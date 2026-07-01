@@ -1,0 +1,40 @@
+# ── Build artifacts ──
+/dist/
+build/
+*.o
+*.a
+
+# ── macOS ──
+.DS_Store
+*.dmg
+*.zip
+
+# ── Secrets / AWS credential backups (never commit) ──
+*.bak.*
+credentials.bak.*
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.cer
+
+# ── Claude Code / ruflo tooling (local dev only — not part of the app) ──
+.claude/
+.claude-flow/
+.claude-flow.db
+CLAUDE.md
+.mcp.json
+.swarm/
+ruvector.db
+memory/
+
+# ── Node / npx ──
+node_modules/
+
+# ── Go coverage / analysis output ──
+*.out
+*.out.tmp
+coverage*
+cov_*

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Hardened Runtime entitlements for EZ Cloud Manager.
+
+      App Sandbox is intentionally NOT enabled: the app reads and writes
+      ~/.aws/credentials directly and spawns the bundled `ezcloud` CLI. Enabling
+      the sandbox would block both without a security-scoped-bookmark redesign
+      (deferred with the storage/Keychain work).
+
+      These keys keep the Hardened Runtime strict: no JIT, no unsigned executable
+      memory, no dyld env overrides, and no task-allow (no debugger attach).
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+    <key>com.apple.security.get-task-allow</key>
+    <false/>
+</dict>
+</plist>
