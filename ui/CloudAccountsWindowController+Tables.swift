@@ -1,6 +1,6 @@
 import AppKit
 
-extension ProfileWindowController {
+extension CloudAccountsWindowController {
     func numberOfRows(in tableView: NSTableView) -> Int {
         tableView == profilesTable ? sidebarRows.count : displayItems.count
     }
@@ -13,10 +13,6 @@ extension ProfileWindowController {
                 return providerHeaderCell(tableView, providerID: provider, title: title, count: count)
             case .profile(let provider, let name):
                 return profileCell(tableView, providerID: provider, name: name)
-            case .subheader(let title):
-                return subheaderCell(tableView, title: title)
-            case .tool(_, _, let title, let symbol):
-                return toolCell(tableView, title: title, symbol: symbol)
             }
         }
         guard row >= 0, row < displayItems.count else { return nil }
@@ -49,8 +45,8 @@ extension ProfileWindowController {
         if tableView == profilesTable {
             guard row >= 0, row < sidebarRows.count else { return false }
             switch sidebarRows[row] {
-            case .profile, .tool: return true
-            case .header, .subheader: return false
+            case .profile: return true
+            case .header: return false
             }
         }
         guard row >= 0, row < displayItems.count else { return true }
@@ -63,8 +59,7 @@ extension ProfileWindowController {
             guard row >= 0, row < sidebarRows.count else { return 28 }
             switch sidebarRows[row] {
             case .header: return 26
-            case .subheader: return 18
-            case .profile, .tool: return 28
+            case .profile: return 28
             }
         }
         guard row >= 0, row < displayItems.count else { return UI.rowHeight }
@@ -85,9 +80,7 @@ extension ProfileWindowController {
             switch sidebarRows[row] {
             case .profile(let provider, let name):
                 loadProfile(provider: provider, name: name)
-            case .tool(let provider, let id, _, _):
-                openTool(provider: provider, toolID: id)
-            case .header, .subheader:
+            case .header:
                 break
             }
         } else if notification.object as? NSTableView == fieldsTable {
@@ -138,70 +131,6 @@ extension ProfileWindowController {
         let cell = (table.makeView(withIdentifier: id, owner: self) as? ProviderHeaderView)
             ?? ProviderHeaderView(reuseIdentifier: id)
         cell.configure(providerID: providerID, title: title, count: count)
-        return cell
-    }
-
-    /// Tiny "TOOLS" divider between a provider's profiles and its services.
-    private func subheaderCell(_ table: NSTableView, title: String) -> NSView {
-        let id = NSUserInterfaceItemIdentifier("subheaderCell")
-        let cell: NSTableCellView
-        if let reused = table.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
-            cell = reused
-        } else {
-            cell = NSTableCellView()
-            cell.identifier = id
-            let text = NSTextField(labelWithString: "")
-            text.font = .systemFont(ofSize: 10, weight: .semibold)
-            text.textColor = .tertiaryLabelColor
-            text.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(text)
-            cell.textField = text
-            NSLayoutConstraint.activate([
-                text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-                text.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -1)
-            ])
-        }
-        cell.textField?.attributedStringValue = NSAttributedString(
-            string: title.uppercased(),
-            attributes: [.kern: 0.5,
-                         .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                         .foregroundColor: NSColor.tertiaryLabelColor])
-        return cell
-    }
-
-    /// Tool/service row under a provider (SF Symbol + title, secondary tint).
-    private func toolCell(_ table: NSTableView, title: String, symbol: String) -> NSView {
-        let id = NSUserInterfaceItemIdentifier("toolCell")
-        let cell: NSTableCellView
-        if let reused = table.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
-            cell = reused
-        } else {
-            cell = NSTableCellView()
-            cell.identifier = id
-            let icon = NSImageView()
-            icon.contentTintColor = .secondaryLabelColor
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(icon)
-            cell.imageView = icon
-            let text = NSTextField(labelWithString: "")
-            text.font = .systemFont(ofSize: 12)
-            text.textColor = .secondaryLabelColor
-            text.lineBreakMode = .byTruncatingTail
-            text.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(text)
-            cell.textField = text
-            NSLayoutConstraint.activate([
-                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 7),
-                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                icon.widthAnchor.constraint(equalToConstant: 15),
-                text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-                text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-                text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
-        }
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?.withSymbolConfiguration(cfg)
-        cell.textField?.stringValue = title
         return cell
     }
 

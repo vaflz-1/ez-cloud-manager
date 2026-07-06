@@ -198,3 +198,27 @@ struct ApplyResponse: Codable {
     let newVersion: Int64
     let setDefault: Bool
 }
+
+// MARK: - Plugin host (platform v2.0, docs/PLATFORM.md phase P1)
+
+/// A plugin as reported by `ezcloud plugins list --profile ID` — display
+/// metadata plus this profile's enabled state. Contributes/Permissions are a
+/// Tier-1 manifest concern the P1 hub never sees (built-ins are compiled in,
+/// not loaded from a manifest file).
+struct PluginDescriptor: Codable, Equatable {
+    let id: String
+    let name: String
+    let description: String
+    let icon: String       // SF Symbol name
+    let clouds: [String]
+    let category: String   // "DevOps" | "DevSecOps" | "AIOps"
+    let enabled: Bool
+}
+
+/// Mirrors internal/plugin's exported ID constants — keep in sync by hand
+/// (small, stable set; a mismatch just means a card silently doesn't open).
+enum PluginID {
+    static let cloudAccounts = "cloud-accounts"
+    static let launchTemplates = "ec2-launch-templates"
+    static let transfer = "transfer"
+}

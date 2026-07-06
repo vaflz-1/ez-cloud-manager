@@ -1,6 +1,7 @@
 import AppKit
 
-/// EC2 Launch Templates, edited like a plain config file.
+/// EC2 Launch Templates, edited like a plain config file — the
+/// **ec2-launch-templates** built-in plugin (internal/plugin.LaunchTemplatesID).
 ///
 /// AWS launch templates are immutable per version — the console "edit" story
 /// is create-a-new-version-by-hand. This window hides that ceremony behind
@@ -9,10 +10,22 @@ import AppKit
 /// one-click rollback (set default back), and version deletion only as a
 /// separate, explicit, confirmed action. The source version is never
 /// mutated, so every apply has an undo point by construction.
+///
+/// P1 (docs/PLATFORM.md): this window used to get its AWS profile name +
+/// region from ProfileWindowController's embedded sidebar selection. Now
+/// that the Hub has no sidebar, it owns a small AWS-profile picker of its
+/// own, scoped to `owningProfile`'s Accounts filter — the same filter rule
+/// CloudAccountsWindowController applies.
 final class LaunchTemplatesWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let service: CredentialsService
 
+    /// The global profile this Launch Templates window is scoped to — set
+    /// once by present(owningProfile:), read to filter/env-scope AWS accounts.
+    private(set) var owningProfile: Profile?
+    /// The selected AWS credential-entry name (existing, unrelated meaning —
+    /// see CloudAccountsWindowController's own terminology note).
     var profile = ""
+    var awsProfilePopup: NSPopUpButton!
     var regionField: NSTextField!
     var templatesTable: NSTableView!
     var fieldsTable: NSTableView!
@@ -47,12 +60,64 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func present(profile: String, region: String) {
-        self.profile = profile
-        regionField.stringValue = region
-        window?.title = "EC2 Launch Templates — \(profile)"
+    /// Presents the window scoped to `profile` — reloads its AWS-profile
+    /// picker (and, through it, the template list) fresh every time, so a
+    /// reopened window is never stale.
+    func present(owningProfile profile: Profile) {
+        owningProfile = profile
+        window?.title = "Launch Templates — \(profile.name)"
         window?.makeKeyAndOrderFront(nil)
+        loadAwsProfiles()
+    }
+
+    /// Populates the AWS-profile picker from `owningProfile`'s Accounts
+    /// filter (same rule CloudAccountsWindowController applies: every AWS
+    /// account unless the profile shows all), preserving the previously
+    /// chosen profile across a reopen when it's still in range.
+    private func loadAwsProfiles() {
+        guard let owningProfile else { return }
+        busy("Loading AWS profiles…")
+        service.runAsync({ try self.service.list(provider: "aws", extraEnv: owningProfile.envVars.asDictionary()) }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let response):
+                let scoped = !owningProfile.showAllAccounts
+                let names = response.profiles.map(\.name).filter { name in
+                    !scoped || owningProfile.accounts.contains(AccountRef(provider: "aws", account: name))
+                }
+                guard !names.isEmpty else {
+                    self.done("No AWS accounts available in “\(owningProfile.name)” — add one from Cloud Accounts first.")
+                    return
+                }
+                let previous = self.profile
+                self.awsProfilePopup.removeAllItems()
+                self.awsProfilePopup.addItems(withTitles: names)
+                if let idx = names.firstIndex(of: previous) {
+                    self.awsProfilePopup.selectItem(at: idx)
+                }
+                self.awsProfilePopupChanged(self.awsProfilePopup)
+            case .failure(let error):
+                self.failed(error)
+            }
+        }
+    }
+
+    @objc func awsProfilePopupChanged(_ sender: NSPopUpButton) {
+        guard let selected = sender.titleOfSelectedItem else { return }
+        profile = selected
+        window?.title = "Launch Templates — \(owningProfile?.name ?? "") · \(selected)"
+        prefillRegionIfNeeded()
         loadTemplates()
+    }
+
+    /// Fills the region field from the chosen AWS profile's own "region"
+    /// field the first time it's picked; leaves a user-edited value alone.
+    private func prefillRegionIfNeeded() {
+        guard regionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard owningProfile != nil else { return }
+        let region = (try? service.get(provider: "aws", profile, extraEnv: extraEnv()).fields["region"])
+            .flatMap { $0 } ?? ""
+        regionField.stringValue = region.isEmpty ? "us-east-1" : region
     }
 
     // MARK: - Async plumbing
@@ -81,13 +146,19 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         regionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// The owning profile's env vars — threaded into every AWS-facing call,
+    /// same convention CloudAccountsWindowController uses for `extraEnv`.
+    private func extraEnv() -> [String: String] {
+        owningProfile?.envVars.asDictionary() ?? [:]
+    }
+
     // MARK: - Loading
 
     @objc func loadTemplates() {
         guard !region().isEmpty else { return }
-        let (p, r) = (profile, region())
+        let (p, r, env) = (profile, region(), extraEnv())
         busy("Loading launch templates from \(r)…")
-        service.runAsync({ try self.service.launchTemplates(profile: p, region: r) }) { [weak self] result in
+        service.runAsync({ try self.service.launchTemplates(profile: p, region: r, extraEnv: env) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let templates):
@@ -101,10 +172,10 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         }
     }
 
-    private func loadVersions(for template: LaunchTemplate, thenSelect version: String? = nil) {
-        let (p, r) = (profile, region())
+    func loadVersions(for template: LaunchTemplate, thenSelect version: String? = nil) {
+        let (p, r, env) = (profile, region(), extraEnv())
         busy("Loading versions of \(template.name)…")
-        service.runAsync({ try self.service.launchTemplateVersions(profile: p, region: r, name: template.name) }) { [weak self] result in
+        service.runAsync({ try self.service.launchTemplateVersions(profile: p, region: r, name: template.name, extraEnv: env) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let versions):
@@ -119,10 +190,10 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         }
     }
 
-    private func loadVersionData(template: LaunchTemplate, version: String) {
-        let (p, r) = (profile, region())
+    func loadVersionData(template: LaunchTemplate, version: String) {
+        let (p, r, env) = (profile, region(), extraEnv())
         busy("Loading \(template.name) v\(version)…")
-        service.runAsync({ try self.service.launchTemplateData(profile: p, region: r, name: template.name, version: version) }) { [weak self] result in
+        service.runAsync({ try self.service.launchTemplateData(profile: p, region: r, name: template.name, version: version, extraEnv: env) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let data):
@@ -169,7 +240,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
 
     // MARK: - Editing model
 
-    private func applyFieldFilter() {
+    func applyFieldFilter() {
         let query = fieldSearch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var keys = Set(originalFlat.keys).union(editedFlat.keys).sorted()
         if !query.isEmpty {
@@ -189,7 +260,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         return keys
     }
 
-    private func updateApplyState() {
+    func updateApplyState() {
         let changed = changedKeys()
         applyButton.isEnabled = currentTemplate != nil && !changed.isEmpty
         applyButton.title = changed.isEmpty ? "Apply as New Version" : "Apply as New Version (\(changed.count))"
@@ -219,7 +290,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let (p, r) = (profile, region())
+        let (p, r, env) = (profile, region(), extraEnv())
         let source = loadedVersion
         let description = descriptionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let setDefault = setDefaultCheckbox.state == .on
@@ -230,7 +301,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
                 profile: p, region: r, name: template.name,
                 sourceVersion: source,
                 description: description.isEmpty ? "Edited with EZ Cloud Manager (from v\(source))" : description,
-                setDefault: setDefault, fields: edits)
+                setDefault: setDefault, fields: edits, extraEnv: env)
         }) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -254,9 +325,9 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let (p, r) = (profile, region())
+        let (p, r, env) = (profile, region(), extraEnv())
         busy("Rolling back default to v\(target)…")
-        service.runAsync({ try self.service.setLaunchTemplateDefault(profile: p, region: r, name: template.name, version: String(target)) }) { [weak self] result in
+        service.runAsync({ try self.service.setLaunchTemplateDefault(profile: p, region: r, name: template.name, version: String(target), extraEnv: env) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
@@ -284,9 +355,9 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let (p, r) = (profile, region())
+        let (p, r, env) = (profile, region(), extraEnv())
         busy("Deleting v\(version)…")
-        service.runAsync({ try self.service.deleteLaunchTemplateVersions(profile: p, region: r, name: template.name, versions: [version]) }) { [weak self] result in
+        service.runAsync({ try self.service.deleteLaunchTemplateVersions(profile: p, region: r, name: template.name, versions: [version], extraEnv: env) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
@@ -324,111 +395,4 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         return scroll
     }
 
-    // MARK: - Table plumbing
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView == templatesTable ? templates.count : visibleKeys.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView == templatesTable {
-            guard row < templates.count else { return nil }
-            let template = templates[row]
-            let id = NSUserInterfaceItemIdentifier("ltCell")
-            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView) ?? {
-                let c = NSTableCellView(); c.identifier = id
-                let t = NSTextField(labelWithString: ""); t.font = .systemFont(ofSize: 12)
-                t.lineBreakMode = .byTruncatingTail
-                t.translatesAutoresizingMaskIntoConstraints = false
-                c.addSubview(t); c.textField = t
-                NSLayoutConstraint.activate([
-                    t.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 8),
-                    t.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -6),
-                    t.centerYAnchor.constraint(equalTo: c.centerYAnchor)])
-                return c
-            }()
-            cell.textField?.stringValue = template.name
-            cell.toolTip = "\(template.id) · default v\(template.defaultVersion) · latest v\(template.latestVersion)"
-            return cell
-        }
-
-        guard row < visibleKeys.count else { return nil }
-        let key = visibleKeys[row]
-        let isKeyColumn = tableColumn?.identifier.rawValue == "key"
-        let id = NSUserInterfaceItemIdentifier(isKeyColumn ? "ltKey" : "ltValue")
-        let field = (tableView.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
-            let f = NSTextField(string: "")
-            f.identifier = id
-            f.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            f.isBordered = false
-            f.drawsBackground = false
-            f.focusRingType = .none
-            f.usesSingleLineMode = true
-            f.lineBreakMode = .byTruncatingTail
-            f.cell?.isScrollable = true
-            if !isKeyColumn {
-                f.target = self
-                f.action = #selector(self.valueEdited(_:))
-            }
-            return f
-        }()
-        if isKeyColumn {
-            field.isEditable = false
-            field.textColor = originalFlat[key] == nil ? .systemBlue : .secondaryLabelColor
-            field.stringValue = key
-        } else {
-            field.isEditable = true
-            let value = editedFlat[key] ?? ""
-            field.textColor = (originalFlat[key] ?? "") != value ? .systemOrange : .labelColor
-            field.stringValue = value
-            field.tag = row
-        }
-        return field
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard notification.object as? NSTableView == templatesTable else { return }
-        let row = templatesTable.selectedRow
-        guard row >= 0, row < templates.count else { return }
-        rollbackVersion = nil
-        currentTemplate = templates[row]
-        loadVersions(for: templates[row])
-    }
-
-    @objc func valueEdited(_ sender: NSTextField) {
-        let row = sender.tag
-        guard row >= 0, row < visibleKeys.count else { return }
-        editedFlat[visibleKeys[row]] = sender.stringValue
-        updateApplyState()
-        fieldsTable.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0..<2))
-    }
-
-    @objc func versionPicked(_ sender: NSPopUpButton) {
-        guard let template = currentTemplate,
-              let version = sender.selectedItem?.representedObject as? String else { return }
-        loadVersionData(template: template, version: version)
-    }
-
-    @objc func addField() {
-        let alert = NSAlert()
-        alert.messageText = "Add field"
-        alert.informativeText = "Dotted path into LaunchTemplateData, e.g. InstanceType or TagSpecifications[0].Tags[0].Value"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        field.placeholderString = "InstanceType"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        editedFlat[key] = editedFlat[key] ?? ""
-        applyFieldFilter()
-        updateApplyState()
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        if obj.object as? NSSearchField == fieldSearch {
-            applyFieldFilter()
-        }
-    }
 }

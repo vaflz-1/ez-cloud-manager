@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"ez-cloud-manager/internal/plugin"
 	"ez-cloud-manager/internal/workspace"
 )
 
@@ -131,5 +132,62 @@ func TestMigrateSkipsWorkspaceNameAlreadyPresent(t *testing.T) {
 	list, _ := List(root)
 	if len(list) != 1 {
 		t.Fatalf("want 1 profile (no duplicate), got %d", len(list))
+	}
+}
+
+// TestMigrateFromWorkspacesPreEnablesCloudAccounts covers a P1 edge case in
+// the v1.1 -> v2.0 migration path: a profile created HERE (from a real
+// legacy workspace, with real account references) is written via Create,
+// which always stamps currentVersion (2) — so it never takes the Version<2
+// branch in readProfile that auto-enables cloud-accounts for a pre-P1
+// profile already on disk (see profile.go). Without an explicit pre-enable
+// in the per-workspace loop itself, a user whose very first ezcloud launch
+// is already a P1+ build (no intermediate P0-only run in between) would get
+// an empty Hub despite having real, already-configured cloud accounts — so
+// MigrateFromWorkspaces sets EnabledPlugins directly for profiles it creates
+// from a real legacy workspace. The "zero profiles" fallback (a truly fresh
+// install, no legacy workspace at all) is deliberately excluded — that one
+// still gets the empty-skeleton Default profile P1 intends.
+func TestMigrateFromWorkspacesPreEnablesCloudAccounts(t *testing.T) {
+	seedLegacyWorkspaces(t, workspace.Workspace{Name: "acme-prod", Members: []workspace.Member{{Provider: "aws", Profile: "prod"}}})
+
+	root := tmpRoot(t)
+	if _, err := MigrateFromWorkspaces(root); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 profile, got %d", len(list))
+	}
+	if len(list[0].EnabledPlugins) != 1 || list[0].EnabledPlugins[0] != plugin.CloudAccountsID {
+		t.Fatalf("EnabledPlugins = %+v, want [%s] pre-enabled for a profile migrated from a real legacy workspace", list[0].EnabledPlugins, plugin.CloudAccountsID)
+	}
+}
+
+// TestMigrateFreshInstallDoesNotPreEnableAnything ensures the fix above is
+// scoped correctly: the "zero legacy workspaces" fallback Default profile
+// must stay a genuinely empty skeleton, not accidentally pick up
+// cloud-accounts too.
+func TestMigrateFreshInstallDoesNotPreEnableAnything(t *testing.T) {
+	seedLegacyWorkspaces(t) // no legacy workspaces at all
+
+	root := tmpRoot(t)
+	if _, err := MigrateFromWorkspaces(root); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Name != "Default" {
+		t.Fatalf("expected a single Default profile, got %+v", list)
+	}
+	if len(list[0].EnabledPlugins) != 0 {
+		t.Fatalf("EnabledPlugins = %+v, want empty for the fresh-install fallback Default profile", list[0].EnabledPlugins)
 	}
 }

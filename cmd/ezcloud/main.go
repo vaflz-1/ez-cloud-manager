@@ -81,6 +81,8 @@ func main() {
 		auditCommand(rest)
 	case "lt":
 		ltCommand(rest)
+	case "plugins":
+		pluginsCommand(rest)
 	default:
 		usage()
 		os.Exit(2)
@@ -207,6 +209,7 @@ func usage() {
   ezcloud profile  list|show|create|save|rename|duplicate|delete|export|import|migrate
   ezcloud audit    [--limit N]
   ezcloud lt       templates|versions|get|apply|set-default|delete-versions …
+  ezcloud plugins  list [--profile ID] | enable|disable --profile ID --id ID
 
 The default provider is "aws", preserving the original single-cloud behavior.`)
 }

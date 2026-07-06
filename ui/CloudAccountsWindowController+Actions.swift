@@ -1,6 +1,6 @@
 import AppKit
 
-extension ProfileWindowController {
+extension CloudAccountsWindowController {
     @objc func refreshTapped() {
         refreshProfiles()
     }

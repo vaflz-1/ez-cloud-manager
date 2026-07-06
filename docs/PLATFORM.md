@@ -38,6 +38,14 @@ Goals, in the user's words:
 4. **Low-code for DevOps.** The end state is a graphical environment
    covering the full vendor-CLI capability surface; every flow favors
    visual, declarative interaction over memorizing CLI incantations.
+5. **Core owns no plugin data.** A core profile is exactly: name, env
+   vars, enabled plugins, per-plugin settings blobs, window state.
+   Anything domain-specific (e.g. the Cloud Accounts scoping list) lives
+   in the owning plugin's settings namespace and is edited in that
+   plugin's UI, never in the core profile editor.
+6. **Errors are guided flows.** A blocked operation (e.g. deleting the
+   active gcloud configuration) must offer the unblocking action in
+   place, not a bare error dialog.
 
 ## Core vs. plugins
 
@@ -195,9 +203,9 @@ Rename/duplicate/edit with zero CLI friction.
 | Phase | Deliverable | Acceptance |
 |---|---|---|
 | **P0 Profiles** | Global profile engine, multi-window per profile, profile CRUD/rename/export/import UI, per-profile env vars | Two windows on two profiles with different env/accounts simultaneously |
-| **P1 Plugin host** | Manifest schema, contribution registry, declarative renderer, credential broker, hot reload | `ec2-launch-templates` extracted from core and running as a Tier 1 plugin with create/delete/duplicate-edit |
+| **P1 Plugin host** *(shipped July 2026)* | Plugin registry (compile-time "builtin" runtime), per-profile enable/disable, `ezcloud plugins` CLI, Plugin Hub shell (empty state + catalog), Cloud Accounts / Launch Templates / Transfer repackaged as separately-opening built-in plugins, menu-bar diet | Fresh profile → empty hub → enable from catalog → card appears → own window; two profiles hold independent plugin sets |
 | **P2 Plugin manager** | Plugin-manager plugin, registry format, install/update/remove, permission consent UI, signatures | Install a plugin from a git registry through the UI; menu items appear live |
-| **P3 AI layer** | Schemas published, scaffold/validate CLI, llms.txt, live diff badges | A fresh LLM session generates a working "S3 buckets" plugin from schemas alone |
+| **P3 AI layer** | Tier 1 declarative runtime (manifest loading, declarative renderer, credential broker enforcement, hot reload), schemas published, scaffold/validate CLI, llms.txt, live diff badges | `ec2-launch-templates` re-shipped as a Tier 1 declarative plugin; a fresh LLM session generates a working "S3 buckets" plugin from schemas alone |
 | **P4 Resource fleet** | `resources` contribution point at scale: all-regions EC2 live view, k8s clusters status, Tier 2 runtime | Multi-region dashboards; first Tier 2 plugin (streaming) |
 | **P5 DevSecOps pack** | IAM helper, S3/posture audit, secrets browsers, rotation reminders as marketplace plugins | Security pack passes its own audit-log review |
 

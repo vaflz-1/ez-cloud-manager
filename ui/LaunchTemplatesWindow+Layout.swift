@@ -15,6 +15,10 @@ extension LaunchTemplatesWindowController {
         let content = NSView()
         win.contentView = content
 
+        awsProfilePopup = NSPopUpButton()
+        awsProfilePopup.target = self
+        awsProfilePopup.action = #selector(awsProfilePopupChanged(_:))
+
         regionField = NSTextField(string: "")
         regionField.placeholderString = "us-east-1"
         regionField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -31,7 +35,10 @@ extension LaunchTemplatesWindowController {
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
-        let topBar = NSStackView(views: [NSTextField(labelWithString: "Region:"), regionField, loadButton, spinner, statusLabel])
+        let topBar = NSStackView(views: [
+            NSTextField(labelWithString: "AWS profile:"), awsProfilePopup,
+            NSTextField(labelWithString: "Region:"), regionField, loadButton, spinner, statusLabel
+        ])
         topBar.orientation = .horizontal
         topBar.spacing = 8
         topBar.translatesAutoresizingMaskIntoConstraints = false

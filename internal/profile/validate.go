@@ -25,9 +25,9 @@ func validateProfile(p Profile) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
-	enabledPlugins := p.EnabledPlugins
-	if enabledPlugins == nil {
-		enabledPlugins = []string{}
+	enabledPlugins, err := normalizeEnabledPlugins(p.EnabledPlugins)
+	if err != nil {
+		return Profile{}, err
 	}
 	return Profile{
 		Name:            name,
@@ -116,6 +116,39 @@ func normalizeEnvVars(in []EnvVar) ([]EnvVar, error) {
 	out := make([]EnvVar, 0, len(order))
 	for _, key := range order {
 		out = append(out, EnvVar{Key: key, Value: byKey[key]})
+	}
+	return out, nil
+}
+
+// normalizeEnabledPlugins trims/dedupes plugin ids, capped like
+// normalizeEnvVars. It deliberately does NOT reject an id this build doesn't
+// recognize (no check against plugin.ByID) — internal/profile stays
+// registry-agnostic, the same "skip/keep what you don't recognize, never
+// destroy it" philosophy List already uses for unreadable profiles. That is
+// what lets a `profile import` of a foreign `.ezprofile` (or a future P2
+// marketplace install) round-trip an id this build doesn't statically know,
+// instead of silently stripping it on the next save. Consumers (the CLI's
+// `plugins list`, the Swift hub) are the ones that filter to known ids for
+// DISPLAY.
+func normalizeEnabledPlugins(in []string) ([]string, error) {
+	if len(in) > maxEnabledPlugins {
+		return nil, fmt.Errorf("at most %d enabled plugins are allowed per profile", maxEnabledPlugins)
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, id := range in {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if hasControlChars(id) {
+			return nil, errors.New("enabled plugin id must not contain control characters")
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
 	}
 	return out, nil
 }

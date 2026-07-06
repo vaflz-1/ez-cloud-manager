@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"ez-cloud-manager/internal/plugin"
 	"ez-cloud-manager/internal/workspace"
 )
 
@@ -52,7 +53,16 @@ func MigrateFromWorkspaces(root string) (int, error) {
 		for _, m := range w.Members {
 			accounts = append(accounts, AccountRef{Provider: m.Provider, Account: m.Profile})
 		}
-		created, err := Create(root, Profile{Name: w.Name, Accounts: accounts})
+		// A profile born from a real legacy workspace already has a working
+		// credentials setup — pre-enable cloud-accounts here too, the same as
+		// readProfile does in memory for a pre-P1 profile.json already on
+		// disk (see profile.go). Without this, a user whose very first
+		// ezcloud launch is already P1+ (no separate P0-only run in between)
+		// would get an empty Hub despite having real, already-configured
+		// accounts. The "zero profiles" fallback below stays untouched — a
+		// truly fresh install (no legacy workspace at all) still gets the
+		// empty-skeleton Default profile P1 intends.
+		created, err := Create(root, Profile{Name: w.Name, Accounts: accounts, EnabledPlugins: []string{plugin.CloudAccountsID}})
 		if err != nil {
 			return migrated, err
 		}

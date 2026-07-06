@@ -66,7 +66,9 @@ macOS.** Free + Ko-fi, no subscription, no telemetry, no Electron.
 Applied already: sidebar tree with TOOLS subheader, provider brand badges +
 row dots + counts, PROFILE-card accent stripe, filter-hygiene empty states
 with selection restore, hover-gated pulsing Ko-fi heart (85%→100% opacity).
-Remaining, in order: shared icon+title+body+button template for all empty
+Remaining, in order: restore keyboard shortcuts on plugin windows
+(⌘N/⌘S/⌘R/⌘I/⌘E/⌘L lost in the P1 menu-bar diet — bind them on each
+plugin window's own UI) · shared icon+title+body+button template for all empty
 states · secret reveal cross-fade (0.12s) + eye hover tint · LT window
 visual parity with the main window (unified toolbar, source-list templates,
 "v3 (active)" green dot, "Apply as vN" prominent button) · Save as

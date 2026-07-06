@@ -1,6 +1,6 @@
 import AppKit
 
-extension ProfileWindowController {
+extension CloudAccountsWindowController {
     /// Provider that owns the profile being edited: the selected profile's
     /// provider, or the provider chosen in the popup for a new profile.
     func currentEditingProvider() -> String {
@@ -62,20 +62,12 @@ extension ProfileWindowController {
                 }
                 return query.isEmpty || summary.name.localizedCaseInsensitiveContains(query)
             }
-            let tools = providerTools(info.id, matching: query)
             // Hide empty provider groups while filtering/account-scoped so
             // the list stays dense; show them when browsing everything (an
             // empty "Azure" header is the discoverable way to add one).
-            if visible.isEmpty && tools.isEmpty && (scoped || !query.isEmpty) { continue }
+            if visible.isEmpty && (scoped || !query.isEmpty) { continue }
             rows.append(.header(provider: info.id, title: info.displayName, count: visible.count))
             rows.append(contentsOf: visible.map { .profile(provider: info.id, name: $0.name) })
-            // A "TOOLS" subheader separates services from profiles so tools
-            // don't read as just more profiles (skipped when there is nothing
-            // above them to confuse with).
-            if !tools.isEmpty && !visible.isEmpty {
-                rows.append(.subheader("Tools"))
-            }
-            rows.append(contentsOf: tools)
         }
         sidebarRows = rows
 
@@ -99,21 +91,6 @@ extension ProfileWindowController {
                   let idx = sidebarIndex(ofProfile: hidden.name, provider: hidden.provider) {
             hiddenSelection = nil
             profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        }
-    }
-
-    /// Tool/service rows a provider contributes to the sidebar (the "internal
-    /// apps" of each cloud). Search filters them like profiles.
-    func providerTools(_ providerID: String, matching query: String) -> [SidebarRow] {
-        var tools: [SidebarRow] = []
-        if providerID == "aws" {
-            tools.append(.tool(provider: "aws", id: "launch-templates",
-                               title: "EC2 Launch Templates", symbol: "server.rack"))
-        }
-        guard !query.isEmpty else { return tools }
-        return tools.filter {
-            if case .tool(_, _, let title, _) = $0 { return title.localizedCaseInsensitiveContains(query) }
-            return false
         }
     }
 

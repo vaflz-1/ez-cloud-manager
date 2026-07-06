@@ -17,51 +17,22 @@ extension AppDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(title: "Quit EZ Cloud Manager", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
+        // File: just profile-window plumbing now (docs/PLATFORM.md phase P1
+        // "menu bar is minimal and basic" — every action that used to live
+        // here (New/Save/Refresh/Import/Export/Compare Profile, EC2 Launch
+        // Templates…) is reachable from a Hub card or its own plugin window
+        // instead; menus mirror the interface, they never hold exclusive
+        // functionality).
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
 
-        // Profile (the new global container) management — app-global, so
-        // these targets stay `self` (AppDelegate).
         let newWindowItem = NSMenuItem(title: "New Window with Profile", action: nil, keyEquivalent: "")
         let newWindowSubmenu = NSMenu()
         newWindowSubmenu.delegate = self
         newWindowItem.submenu = newWindowSubmenu
         fileMenu.addItem(newWindowItem)
-        let manageItem = NSMenuItem(title: "Manage Profiles…", action: #selector(manageProfiles), keyEquivalent: ",")
-        manageItem.target = self
-        fileMenu.addItem(manageItem)
-        fileMenu.addItem(.separator())
-
-        // Everything below acts on ONE profile window's credential-entry
-        // editor. `target = nil` routes each command through the responder
-        // chain (key window → its ProfileWindowController) instead of a
-        // fixed target — required now that these actions live on
-        // ProfileWindowController, not AppDelegate.
-        let newItem = NSMenuItem(title: "New Profile", action: #selector(ProfileWindowController.addProfile), keyEquivalent: "n")
-        newItem.target = nil
-        fileMenu.addItem(newItem)
-        let saveItem = NSMenuItem(title: "Save Profile", action: #selector(ProfileWindowController.saveProfile), keyEquivalent: "s")
-        saveItem.target = nil
-        fileMenu.addItem(saveItem)
-        let refreshItem = NSMenuItem(title: "Refresh Profiles", action: #selector(ProfileWindowController.refreshTapped), keyEquivalent: "r")
-        refreshItem.target = nil
-        fileMenu.addItem(refreshItem)
-        fileMenu.addItem(.separator())
-        let importItem = NSMenuItem(title: "Import File…", action: #selector(ProfileWindowController.importFromFile), keyEquivalent: "i")
-        importItem.target = nil
-        fileMenu.addItem(importItem)
-        let exportItem = NSMenuItem(title: "Export to File…", action: #selector(ProfileWindowController.exportToFile), keyEquivalent: "e")
-        exportItem.target = nil
-        fileMenu.addItem(exportItem)
-        let compareItem = NSMenuItem(title: "Compare Profiles…", action: #selector(ProfileWindowController.compareProfiles), keyEquivalent: "d")
-        compareItem.target = nil
-        fileMenu.addItem(compareItem)
-        fileMenu.addItem(.separator())
-        let ltItem = NSMenuItem(title: "EC2 Launch Templates…", action: #selector(ProfileWindowController.openLaunchTemplates), keyEquivalent: "l")
-        ltItem.target = nil
-        fileMenu.addItem(ltItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
 
@@ -79,12 +50,27 @@ extension AppDelegate {
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
 
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(NSMenuItem(title: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""))
+        NSApp.windowsMenu = windowMenu
+
         let helpMenuItem = NSMenuItem()
         mainMenu.addItem(helpMenuItem)
         let helpMenu = NSMenu(title: "Help")
         helpMenuItem.submenu = helpMenu
-        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(ProfileWindowController.openKoFi), keyEquivalent: "")
-        koFiItem.target = nil
+        // Fixed target now (was `nil`/responder-chain routed to whichever
+        // ProfileWindowController was key) — with 4+ window classes in play
+        // post-P1, that trick got fragile. Every Hub keeps its own toolbar
+        // Ko-fi button as a small, deliberate duplicate (see AppDelegate's
+        // openKoFi doc comment).
+        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(openKoFi), keyEquivalent: "")
+        koFiItem.target = self
         helpMenu.addItem(koFiItem)
 
         NSApp.mainMenu = mainMenu

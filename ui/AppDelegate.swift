@@ -2,12 +2,13 @@ import AppKit
 import Foundation
 
 /// AppDelegate owns only app-global concerns: the shared CredentialsService
-/// and ProviderCatalog, the registry of currently-open profile windows, and
-/// the Profile Manager singleton window. Everything that used to live
+/// and ProviderCatalog, the registry of currently-open Plugin Hub windows,
+/// and the Profile Manager singleton window. Everything that used to live
 /// directly on AppDelegate before the platform-v2.0 multi-window split
-/// (sidebar, detail editor, Launch Templates, …) now lives on
-/// ProfileWindowController instead — see its own doc comment for the module
-/// breakdown.
+/// (sidebar, detail editor, Launch Templates, …) — and everything the P1
+/// plugin host (docs/PLATFORM.md) since split out of the Hub into its own
+/// built-in plugin windows — lives elsewhere; see ProfileWindowController's
+/// own doc comment for the module breakdown.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Boundary to the `ezcloud` CLI. Stateless aside from toolPath — safe
     /// to share across every window.
@@ -47,6 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: .profileWindowWillClose, object: nil, queue: .main) { [weak self] note in
             guard let controller = note.object as? ProfileWindowController else { return }
             self?.windowControllers = self?.windowControllers.filter { $0.value !== controller } ?? [:]
+        }
+        NotificationCenter.default.addObserver(forName: .manageProfilesRequested, object: nil, queue: .main) { [weak self] _ in
+            self?.manageProfiles()
         }
 
         openMostRecentOrDefaultProfile()
@@ -95,6 +99,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = profileManagerController ?? ProfileManagerWindowController(service: service)
         profileManagerController = controller
         controller.show()
+    }
+
+    /// The Help menu's fixed target (see AppDelegate+Menu.swift) — a small,
+    /// deliberate duplicate of every Hub's own toolbar Ko-fi button rather
+    /// than new cross-controller plumbing (this codebase already duplicates
+    /// one-liners like showError per-controller on purpose).
+    @objc func openKoFi() {
+        NSWorkspace.shared.open(Self.koFiURL)
     }
 
     private func showError(_ message: String) {

@@ -1,11 +1,12 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// Export / import / compare / activate — moving profile data in and out of
-/// the app. Secret hygiene rules live here: clipboard exports are concealed,
-/// file exports go only where the user explicitly points, imports never
-/// auto-save.
-extension ProfileWindowController {
+/// Export / import / compare / activate — moving credential-entry data in
+/// and out of the app. Secret hygiene rules live here: clipboard exports are
+/// concealed, file exports go only where the user explicitly points, imports
+/// never auto-save. (Whole-PROFILE .ezprofile export/import is a different,
+/// separate concern — see TransferWindowController.)
+extension CloudAccountsWindowController {
     static let exportFormats = ["env", "dotenv", "ini", "json"]
 
     private func exportableSelection() -> (provider: String, name: String)? {
@@ -168,65 +169,6 @@ extension ProfileWindowController {
             setStatus("\(name) is now active (\(catalog.providerDisplayName(selectedProvider)))")
         } catch {
             showError(error.localizedDescription)
-        }
-    }
-
-    // MARK: - Ko-fi & Launch Templates entry points
-
-    @objc func openKoFi() {
-        NSWorkspace.shared.open(AppDelegate.koFiURL)
-    }
-
-    @objc func openLaunchTemplates() {
-        guard selectedProvider == "aws", let profileName = selectedProfileName else {
-            showError("Select an AWS profile first — Launch Templates are read with its credentials.")
-            return
-        }
-        let region = fieldRows.first { $0.key == "region" }?.value.trimmingCharacters(in: .whitespacesAndNewlines)
-        presentLaunchTemplates(profile: profileName, region: region)
-    }
-
-    /// A tool row in the sidebar was activated. Tools open in their own
-    /// surface; the sidebar selection returns to the profile afterwards so
-    /// the detail pane and the list never disagree.
-    func openTool(provider: String, toolID: String) {
-        defer { restoreSidebarSelection() }
-        switch (provider, toolID) {
-        case ("aws", "launch-templates"):
-            // Prefer the profile the user is looking at; else the first AWS
-            // profile — the tool needs *some* credentials to call AWS with.
-            if selectedProvider == "aws", let name = selectedProfileName {
-                let region = fieldRows.first { $0.key == "region" }?.value.trimmingCharacters(in: .whitespacesAndNewlines)
-                presentLaunchTemplates(profile: name, region: region)
-            } else if let first = (profilesByProvider["aws"] ?? []).first?.name {
-                let region = (try? service.get(provider: "aws", first, extraEnv: self.profile.envVars.asDictionary()))?.fields["region"]
-                presentLaunchTemplates(profile: first, region: region)
-            } else {
-                showError("Add an AWS profile first — Launch Templates are read with its credentials.")
-            }
-        default:
-            break
-        }
-    }
-
-    /// Retains this window's own Launch Templates window — one per profile
-    /// window, so two windows never fight over one AWS-account-bound session.
-    private func presentLaunchTemplates(profile profileName: String, region: String?) {
-        let controller = launchTemplatesController ?? LaunchTemplatesWindowController(service: service)
-        launchTemplatesController = controller
-        let resolved = (region?.isEmpty == false) ? region! : "us-east-1"
-        controller.present(profile: profileName, region: resolved)
-    }
-
-    /// Puts the sidebar selection back on the loaded profile (or clears it)
-    /// without re-triggering selection side effects.
-    private func restoreSidebarSelection() {
-        isRebuildingSidebar = true
-        defer { isRebuildingSidebar = false }
-        if let name = selectedProfileName, let idx = sidebarIndex(ofProfile: name, provider: selectedProvider) {
-            profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        } else {
-            profilesTable.deselectAll(nil)
         }
     }
 }

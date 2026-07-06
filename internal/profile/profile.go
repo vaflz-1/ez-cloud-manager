@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"ez-cloud-manager/internal/plugin"
 )
 
 const (
@@ -34,12 +36,18 @@ const (
 	// internal/workspace's single envelope version, each profile.json carries
 	// its own version — List skips (rather than fails on) any one profile
 	// that a newer build wrote.
-	currentVersion = 1
+	//
+	// v2: P1 plugin host — EnabledPlugins gains real meaning; see
+	// readProfile's legacy-profile migration below.
+	currentVersion = 2
 	// maxNameLen bounds a profile name, measured in Unicode code points.
 	maxNameLen = 64
 	// maxEnvVars caps env vars per profile — generous for real use, small
 	// enough that a profile.json can never balloon.
 	maxEnvVars = 200
+	// maxEnabledPlugins caps enabled-plugin ids per profile — same rationale
+	// as maxEnvVars.
+	maxEnabledPlugins = 50
 )
 
 // AccountRef references one (provider, account) credential entry by name —
@@ -312,7 +320,31 @@ func readProfile(root, dirName string) (Profile, error) {
 	if p.EnabledPlugins == nil {
 		p.EnabledPlugins = []string{}
 	}
+	// legacyDefaultPlugin is auto-enabled (in memory, on every read) for a
+	// profile written by a pre-P1 build (Version < 2) — so an existing
+	// user's window keeps showing what it always showed (the credentials
+	// browser) instead of a suddenly-empty hub. This is intentionally NOT a
+	// batch migration pass: it becomes PERMANENT the moment this profile is
+	// next Saved for any reason (Save always writes currentVersion=2) —
+	// including the user's own first enable/disable — at which point their
+	// explicit choice sticks and this default stops recomputing. Fresh
+	// profiles created after P1 start with none enabled by deliberate design
+	// (empty skeleton first, docs/PLATFORM.md).
+	const legacyDefaultPlugin = plugin.CloudAccountsID
+	if p.Version < 2 {
+		p.EnabledPlugins = ensureContains(p.EnabledPlugins, legacyDefaultPlugin)
+	}
 	return p, nil
+}
+
+// ensureContains returns ids with id appended if not already present.
+func ensureContains(ids []string, id string) []string {
+	for _, existing := range ids {
+		if existing == id {
+			return ids
+		}
+	}
+	return append(ids, id)
 }
 
 // writeProfile marshals p and replaces its profile.json atomically (temp
