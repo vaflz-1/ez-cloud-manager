@@ -1,0 +1,435 @@
+package profile
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func tmpRoot(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "profiles")
+}
+
+func mustCreate(t *testing.T, root string, p Profile) Profile {
+	t.Helper()
+	created, err := Create(root, p)
+	if err != nil {
+		t.Fatalf("create %q: %v", p.Name, err)
+	}
+	return created
+}
+
+func TestCreateListRoundtrip(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "prod", Accounts: []AccountRef{{Provider: "aws", Account: "default"}}})
+	if created.ID == "" {
+		t.Fatal("expected a generated ID")
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 profile, got %d", len(list))
+	}
+	if list[0].Name != "prod" {
+		t.Fatalf("name = %q", list[0].Name)
+	}
+	if len(list[0].Accounts) != 1 || list[0].Accounts[0] != (AccountRef{Provider: "aws", Account: "default"}) {
+		t.Fatalf("accounts = %+v", list[0].Accounts)
+	}
+}
+
+func TestCreateRejectsDuplicateNameCaseInsensitive(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "Prod"})
+	if _, err := Create(root, Profile{Name: "prod"}); err == nil {
+		t.Fatal("expected error creating a case-insensitive duplicate name")
+	}
+}
+
+func TestIDStableAcrossSave(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "a"})
+	created.Name = "a-renamed"
+	if err := Save(root, created); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Get(root, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("id changed across save: %q -> %q", created.ID, got.ID)
+	}
+	if got.Name != "a-renamed" {
+		t.Fatalf("name = %q", got.Name)
+	}
+	if got.CreatedAt != created.CreatedAt {
+		t.Fatalf("createdAt should be preserved: %q -> %q", created.CreatedAt, got.CreatedAt)
+	}
+}
+
+func TestSaveRejectsCollisionWithDifferentProfile(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "a"})
+	b := mustCreate(t, root, Profile{Name: "b"})
+
+	b.Name = "a"
+	if err := Save(root, b); err == nil {
+		t.Fatal("expected error saving onto another profile's name")
+	}
+}
+
+func TestSaveMissingIDFails(t *testing.T) {
+	root := tmpRoot(t)
+	if err := Save(root, Profile{Name: "ghost"}); err == nil {
+		t.Fatal("expected error saving without an id")
+	}
+}
+
+func TestRename(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "old"})
+	if err := Rename(root, created.ID, "new"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got, err := Get(root, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "new" {
+		t.Fatalf("name = %q", got.Name)
+	}
+}
+
+func TestRenameToExistingFails(t *testing.T) {
+	root := tmpRoot(t)
+	a := mustCreate(t, root, Profile{Name: "a"})
+	mustCreate(t, root, Profile{Name: "b"})
+	if err := Rename(root, a.ID, "b"); err == nil {
+		t.Fatal("expected error renaming onto an existing name")
+	}
+}
+
+func TestRenameToSameNameIsAllowed(t *testing.T) {
+	root := tmpRoot(t)
+	a := mustCreate(t, root, Profile{Name: "a"})
+	if err := Rename(root, a.ID, "a"); err != nil {
+		t.Fatalf("rename to same name should be a no-op, got %v", err)
+	}
+}
+
+func TestDuplicate(t *testing.T) {
+	root := tmpRoot(t)
+	src := mustCreate(t, root, Profile{
+		Name:     "prod",
+		Accounts: []AccountRef{{Provider: "aws", Account: "default"}},
+		EnvVars:  []EnvVar{{Key: "REGION", Value: "us-east-1"}},
+	})
+
+	dup, err := Duplicate(root, src.ID, "")
+	if err != nil {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if dup.ID == src.ID {
+		t.Fatal("duplicate should get a new ID")
+	}
+	if dup.Name != "prod copy" {
+		t.Fatalf("default duplicate name = %q", dup.Name)
+	}
+	if len(dup.Accounts) != 1 || dup.Accounts[0] != src.Accounts[0] {
+		t.Fatalf("accounts not copied: %+v", dup.Accounts)
+	}
+	if len(dup.EnvVars) != 1 || dup.EnvVars[0] != src.EnvVars[0] {
+		t.Fatalf("env vars not copied: %+v", dup.EnvVars)
+	}
+}
+
+func TestDuplicateWithExplicitName(t *testing.T) {
+	root := tmpRoot(t)
+	src := mustCreate(t, root, Profile{Name: "prod"})
+	dup, err := Duplicate(root, src.ID, "staging")
+	if err != nil {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if dup.Name != "staging" {
+		t.Fatalf("name = %q", dup.Name)
+	}
+}
+
+func TestDuplicateExplicitNameCollisionFails(t *testing.T) {
+	root := tmpRoot(t)
+	src := mustCreate(t, root, Profile{Name: "prod"})
+	mustCreate(t, root, Profile{Name: "staging"})
+	if _, err := Duplicate(root, src.ID, "staging"); err == nil {
+		t.Fatal("expected error duplicating onto an existing name")
+	}
+}
+
+func TestDeleteLastProfileIsRefused(t *testing.T) {
+	root := tmpRoot(t)
+	only := mustCreate(t, root, Profile{Name: "only"})
+	if err := Delete(root, only.ID); err == nil {
+		t.Fatal("expected error deleting the last remaining profile")
+	}
+}
+
+func TestDeleteRemovesProfile(t *testing.T) {
+	root := tmpRoot(t)
+	a := mustCreate(t, root, Profile{Name: "a"})
+	mustCreate(t, root, Profile{Name: "b"})
+
+	if err := Delete(root, a.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	list, _ := List(root)
+	if len(list) != 1 || list[0].Name != "b" {
+		t.Fatalf("after delete: %+v", list)
+	}
+}
+
+func TestDeleteMissingFails(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "a"})
+	if err := Delete(root, "nonexistent"); err == nil {
+		t.Fatal("expected error deleting an absent profile")
+	}
+}
+
+func TestShowAllAccountsRoundtrips(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "a", ShowAllAccounts: true})
+	got, err := Get(root, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShowAllAccounts {
+		t.Fatal("showAllAccounts should round-trip true")
+	}
+}
+
+func TestListSkipsCorruptFolder(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "good"})
+
+	badDir := filepath.Join(root, "not-json-id")
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "profile.json"), []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatalf("list should not fail on a corrupt entry: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "good" {
+		t.Fatalf("expected only the good profile, got %+v", list)
+	}
+}
+
+func TestListSkipsMismatchedID(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "good"})
+
+	dir := filepath.Join(root, "folder-name")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mismatched := Profile{ID: "some-other-id", Name: "mismatched", Version: currentVersion}
+	data, _ := json.Marshal(mismatched)
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "good" {
+		t.Fatalf("expected mismatched-id folder to be skipped, got %+v", list)
+	}
+}
+
+func TestListSkipsNewerVersion(t *testing.T) {
+	root := tmpRoot(t)
+	mustCreate(t, root, Profile{Name: "good"})
+
+	dir := filepath.Join(root, "future-id")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	future := Profile{ID: "future-id", Name: "future", Version: currentVersion + 1}
+	data, _ := json.Marshal(future)
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := List(root)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "good" {
+		t.Fatalf("expected newer-schema folder to be skipped, got %+v", list)
+	}
+}
+
+func TestListMissingRoot(t *testing.T) {
+	list, err := List(filepath.Join(t.TempDir(), "nope"))
+	if err != nil {
+		t.Fatalf("missing root should not error: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("want empty, got %d", len(list))
+	}
+}
+
+func TestCreateWritesRestrictivePerms(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "a"})
+	info, err := os.Stat(filepath.Join(root, created.ID, "profile.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("perm = %o, want 600", perm)
+	}
+}
+
+func TestValidationRejections(t *testing.T) {
+	root := tmpRoot(t)
+	longName := strings.Repeat("x", maxNameLen+1)
+	cases := []struct {
+		desc string
+		p    Profile
+	}{
+		{"empty name", Profile{Name: "  "}},
+		{"too long name", Profile{Name: longName}},
+		{"control char name", Profile{Name: "bad\nname"}},
+		{"empty account provider", Profile{Name: "ok1", Accounts: []AccountRef{{Provider: " ", Account: "p"}}}},
+		{"empty account name", Profile{Name: "ok2", Accounts: []AccountRef{{Provider: "aws", Account: ""}}}},
+		{"control char account", Profile{Name: "ok3", Accounts: []AccountRef{{Provider: "aws", Account: "p\x00"}}}},
+		{"empty env key", Profile{Name: "ok4", EnvVars: []EnvVar{{Key: " ", Value: "x"}}}},
+		{"control char env key", Profile{Name: "ok5", EnvVars: []EnvVar{{Key: "bad\nkey", Value: "x"}}}},
+		{"secret-looking env key", Profile{Name: "ok6", EnvVars: []EnvVar{{Key: "AWS_SECRET_ACCESS_KEY", Value: "x"}}}},
+		{"token-looking env key", Profile{Name: "ok7", EnvVars: []EnvVar{{Key: "API_TOKEN", Value: "x"}}}},
+		{"password-looking env key", Profile{Name: "ok8", EnvVars: []EnvVar{{Key: "DB_PASSWORD", Value: "x"}}}},
+		{"hijack var DYLD_INSERT_LIBRARIES", Profile{Name: "ok9", EnvVars: []EnvVar{{Key: "DYLD_INSERT_LIBRARIES", Value: "/tmp/evil.dylib"}}}},
+		{"hijack var LD_PRELOAD", Profile{Name: "ok10", EnvVars: []EnvVar{{Key: "LD_PRELOAD", Value: "/tmp/evil.so"}}}},
+		{"hijack var NODE_OPTIONS", Profile{Name: "ok11", EnvVars: []EnvVar{{Key: "NODE_OPTIONS", Value: "--require /tmp/evil.js"}}}},
+		{"hijack var PATH", Profile{Name: "ok12", EnvVars: []EnvVar{{Key: "PATH", Value: "/tmp/evil:/usr/bin"}}}},
+		{"hijack var lowercase path", Profile{Name: "ok13", EnvVars: []EnvVar{{Key: "path", Value: "/tmp/evil"}}}},
+		{"hijack var mixed-case Dyld_Insert_Libraries", Profile{Name: "ok14", EnvVars: []EnvVar{{Key: "Dyld_Insert_Libraries", Value: "/tmp/evil.dylib"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if _, err := Create(root, tc.p); err == nil {
+				t.Fatalf("expected validation error for %s", tc.desc)
+			}
+		})
+	}
+}
+
+func TestValidationAcceptsNonSecretEnvVar(t *testing.T) {
+	root := tmpRoot(t)
+	if _, err := Create(root, Profile{Name: "ok", EnvVars: []EnvVar{{Key: "AWS_REGION", Value: "us-east-1"}}}); err != nil {
+		t.Fatalf("expected AWS_REGION to be accepted: %v", err)
+	}
+}
+
+func TestValidationAcceptsSafeEnvVars(t *testing.T) {
+	root := tmpRoot(t)
+	safe := []string{"AWS_PROFILE", "AWS_REGION", "AWS_CONFIG_FILE", "CUSTOM_VAR"}
+	for _, key := range safe {
+		t.Run(key, func(t *testing.T) {
+			if _, err := Create(root, Profile{Name: "ok-" + key, EnvVars: []EnvVar{{Key: key, Value: "x"}}}); err != nil {
+				t.Fatalf("expected %s to be accepted: %v", key, err)
+			}
+		})
+	}
+}
+
+func TestEnvVarsDedupeByKeyLastWins(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "a", EnvVars: []EnvVar{
+		{Key: "REGION", Value: "first"},
+		{Key: "REGION", Value: "second"},
+	}})
+	if len(created.EnvVars) != 1 || created.EnvVars[0].Value != "second" {
+		t.Fatalf("env vars not deduped last-wins: %+v", created.EnvVars)
+	}
+}
+
+func TestAccountsDedupe(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "a", Accounts: []AccountRef{
+		{Provider: "aws", Account: "p"},
+		{Provider: "aws", Account: "p"},
+		{Provider: "gcp", Account: "q"},
+	}})
+	if len(created.Accounts) != 2 {
+		t.Fatalf("accounts not deduped: %+v", created.Accounts)
+	}
+}
+
+func TestCreateAcceptsNameWithSpacesAndUnicode(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "日本語 профиль 🚀 prod team"})
+	if created.Name != "日本語 профиль 🚀 prod team" {
+		t.Fatalf("name = %q", created.Name)
+	}
+	got, err := Get(root, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != created.Name {
+		t.Fatalf("name did not round-trip through disk: %q", got.Name)
+	}
+}
+
+func TestCreateTrimsSurroundingWhitespaceFromName(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "  padded name  "})
+	if created.Name != "padded name" {
+		t.Fatalf("name = %q, want trimmed", created.Name)
+	}
+}
+
+func TestRenameAcceptsUnicodeName(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{Name: "old"})
+	if err := Rename(root, created.ID, "réseau été"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got, err := Get(root, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "réseau été" {
+		t.Fatalf("name = %q", got.Name)
+	}
+}
+
+func TestListSortedByNameCaseInsensitive(t *testing.T) {
+	root := tmpRoot(t)
+	for _, n := range []string{"zeta", "Alpha", "mid"} {
+		mustCreate(t, root, Profile{Name: n})
+	}
+	list, err := List(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(list))
+	for _, p := range list {
+		got = append(got, p.Name)
+	}
+	if want := "Alpha,mid,zeta"; strings.Join(got, ",") != want {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}

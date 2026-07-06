@@ -68,16 +68,100 @@ struct ProviderSchema: Codable {
     }
 }
 
-/// A workspace: a named group of (provider, profile) references, so one
-/// person can keep clients/jobs/contexts separated. Never stores secrets.
-struct WorkspaceMember: Codable, Equatable {
+// MARK: - Global profiles (platform v2.0, docs/PLATFORM.md)
+//
+// A Profile is the new global container one app window binds to: cloud
+// account references, env vars, enabled plugins and settings overrides.
+// It supersedes the v1.1 Workspace/WorkspaceMember types (deleted from this
+// file) — the wire contract now speaks Profile/AccountRef throughout.
+//
+// Naming: AccountRef references a per-provider credential entry by name
+// (what the rest of the app calls a "profile" — ProfileSummary,
+// ProfileResponse, --profile NAME). "Account" is used here specifically to
+// avoid colliding with that older, unchanged meaning.
+
+/// One (provider, account) credential-entry reference. Never stores secrets.
+struct AccountRef: Codable, Equatable {
     let provider: String
-    let profile: String
+    let account: String
 }
 
-struct Workspace: Codable {
+/// One non-secret environment variable a profile applies to every `ezcloud`
+/// CLI call made from its window (e.g. a default region).
+struct EnvVar: Codable, Equatable {
+    var key: String
+    var value: String
+}
+
+/// A lossless wrapper for a JSON value this app doesn't interpret. Profile's
+/// `windowState` is opaque here (Go stores it as json.RawMessage) — P0 has no
+/// UI for it, but it must still round-trip untouched through the whole-object
+/// PUT in `saveProfile`, so P1 can start reading/writing it with no data
+/// migration.
+enum JSONValue: Codable, Equatable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null; return }
+        if let v = try? container.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? container.decode(Double.self) { self = .number(v); return }
+        if let v = try? container.decode(String.self) { self = .string(v); return }
+        if let v = try? container.decode([JSONValue].self) { self = .array(v); return }
+        if let v = try? container.decode([String: JSONValue].self) { self = .object(v); return }
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let v): try container.encode(v)
+        case .number(let v): try container.encode(v)
+        case .string(let v): try container.encode(v)
+        case .array(let v): try container.encode(v)
+        case .object(let v): try container.encode(v)
+        }
+    }
+}
+
+/// A global profile: the unit one app window binds to.
+struct Profile: Codable {
+    var id: String
     var name: String
-    var members: [WorkspaceMember]
+    /// Disables the Accounts filter (the window shows every account across
+    /// every provider instead of only the referenced ones).
+    var showAllAccounts: Bool
+    var accounts: [AccountRef]
+    var envVars: [EnvVar]
+    /// P1 placeholder — always empty until the plugin host exists.
+    var enabledPlugins: [String]
+    /// P1+ overrides placeholder, unused by any UI in P0.
+    var settings: [String: String]?
+    var windowState: JSONValue?
+    var version: Int
+    var createdAt: String
+    var updatedAt: String
+}
+
+/// The JSON shape for `ezcloud profile migrate`.
+struct MigrateResponse: Codable {
+    let migrated: Int
+}
+
+extension Array where Element == EnvVar {
+    /// Last-key-wins collapse to the shape CredentialsService's `extraEnv`
+    /// parameters expect.
+    func asDictionary() -> [String: String] {
+        var out: [String: String] = [:]
+        for e in self { out[e.key] = e.value }
+        return out
+    }
 }
 
 /// One editable variable row in the Variables table.

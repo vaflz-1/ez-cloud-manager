@@ -1,6 +1,6 @@
 import AppKit
 
-extension AppDelegate {
+extension ProfileWindowController {
     func numberOfRows(in tableView: NSTableView) -> Int {
         tableView == profilesTable ? sidebarRows.count : displayItems.count
     }

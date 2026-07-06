@@ -1,116 +1,107 @@
 import AppKit
 import Foundation
 
-/// AppDelegate owns the window and app state. Its behavior is split across
-/// focused extensions to keep each concern readable:
-///   - AppDelegate+Menu       — main menu construction
-///   - AppDelegate+Layout     — window / sidebar / detail view building
-///   - AppDelegate+Tables     — NSTableView data source & delegate
-///   - AppDelegate+Actions    — user-triggered actions (add/save/delete/parse)
-///   - AppDelegate+State      — profile loading, field rows, status helpers
-///   - AppDelegate+Transfer   — export / import / compare / activate
-///   - AppDelegate+Workspaces — workspace switching & membership
-///
-/// Members are `internal` (not `private`) because they are shared across those
-/// extension files; the app is a single-module binary, so nothing leaks.
-final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTextViewDelegate, NSToolbarDelegate {
-    var window: NSWindow!
-    var addRemoveControl: NSSegmentedControl!
-    var profilesTable: NSTableView!
-    var fieldsTable: NSTableView!
-    var profileNameField: NSTextField!
-    var profileModeLabel: NSTextField!
-    var providerPopup: NSPopUpButton!
-    var workspacePopup: NSPopUpButton!
-    var pasteView: NSTextView!
-    var pasteLabel: NSTextField!
-    var statusLabel: NSTextField!
-    var variablesTitleLabel: NSTextField!
-    var variablesSummaryLabel: NSTextField!
-    var saveButton: NSButton!
-    var activateButton: NSButton!
-    var exportButton: NSPopUpButton!
-    var profileSearchField: NSSearchField!
-
-    /// Boundary to the `ezcloud` CLI. All persistence goes through this.
+/// AppDelegate owns only app-global concerns: the shared CredentialsService
+/// and ProviderCatalog, the registry of currently-open profile windows, and
+/// the Profile Manager singleton window. Everything that used to live
+/// directly on AppDelegate before the platform-v2.0 multi-window split
+/// (sidebar, detail editor, Launch Templates, …) now lives on
+/// ProfileWindowController instead — see its own doc comment for the module
+/// breakdown.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Boundary to the `ezcloud` CLI. Stateless aside from toolPath — safe
+    /// to share across every window.
     let service = CredentialsService()
+    /// Registered providers + schemas, loaded once and shared read-only.
+    let catalog = ProviderCatalog()
 
-    // MARK: Multi-provider state
-
-    /// Registered backends, in canonical display order (aws, gcp, azure, …).
-    var providers: [ProviderInfo] = []
-    /// Field catalogs per provider id — drive labels, masking, placeholders.
-    var schemas: [String: ProviderSchema] = [:]
-    /// Full profile lists per provider; the sidebar renders a filtered view.
-    var profilesByProvider: [String: [ProfileSummary]] = [:]
-    /// Storage path per provider (shown in status / delete confirmations).
-    var pathsByProvider: [String: String] = [:]
-    /// The rendered sidebar (headers + profiles after search/workspace filter).
-    var sidebarRows: [SidebarRow] = []
-
-    var workspaces: [Workspace] = []
-    /// nil = "All Profiles" (no workspace filter).
-    var activeWorkspaceName: String?
-    /// True while rebuildSidebarRows() reloads the table — reloadData fires
-    /// spurious selection-change notifications that must not clear the detail.
-    var isRebuildingSidebar = false
-    /// Profile whose selection was hidden by the current filter; restored
-    /// automatically the moment the filter lets it back in.
-    var hiddenSelection: (provider: String, name: String)?
-    /// 3px accent stripe on the PROFILE card, tinted by the editing provider.
-    var profileCardStripe: NSView!
-
-    /// Provider owning the currently selected/edited profile.
-    var selectedProvider = "aws"
-    var selectedProfileName: String?
-    var fieldRows: [FieldRow] = []
-    var lastAutoParsedPaste = ""
-
-    /// Retains the Launch Templates window while it is open.
-    var launchTemplatesController: LaunchTemplatesWindowController?
-
-    /// Presentation layer over `fieldRows`: section headers + field references,
-    /// so the flat model drives grouped, collapsible rows (Common/Advanced/…).
-    var displayItems: [VarItem] = []
-    var collapsedSections: Set<VarSection> = []
+    /// Open profile windows, keyed by profile id. At most one window per
+    /// profile — reopening a profile that's already open refocuses it
+    /// instead of creating a second, divergent edit surface.
+    var windowControllers: [String: ProfileWindowController] = [:]
+    var profileManagerController: ProfileManagerWindowController?
 
     static let koFiURL = URL(string: "https://ko-fi.com/vaflz")!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         configureMainMenu()
-        buildWindow()
-        configureToolbar()
-        window.makeKeyAndOrderFront(nil)
+
+        do {
+            try service.ensureProfilesMigrated()
+        } catch {
+            // Migration failure must not block launch — worst case the app
+            // runs against whatever profile.json files already exist.
+            NSLog("profile migration failed: \(error.localizedDescription)")
+        }
+        do {
+            try catalog.load(using: service)
+        } catch {
+            NSLog("loading providers failed: \(error.localizedDescription)")
+        }
+
+        NotificationCenter.default.addObserver(forName: .openProfileWindowRequested, object: nil, queue: .main) { [weak self] note in
+            guard let id = note.object as? String else { return }
+            self?.openWindow(forProfile: id)
+        }
+        NotificationCenter.default.addObserver(forName: .profileWindowWillClose, object: nil, queue: .main) { [weak self] note in
+            guard let controller = note.object as? ProfileWindowController else { return }
+            self?.windowControllers = self?.windowControllers.filter { $0.value !== controller } ?? [:]
+        }
+
+        openMostRecentOrDefaultProfile()
         NSApp.activate(ignoringOtherApps: true)
-        loadProviders()
-        reloadWorkspaces()
-        refreshProfiles()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
-}
 
-/// Logical grouping of credential fields in the Variables editor.
-enum VarSection: String, CaseIterable {
-    case common = "Common"
-    case advanced = "Advanced"
-    case additional = "Additional"
-}
+    /// P0 opens exactly one window on launch — the most-recently-updated
+    /// profile — rather than restoring every previously-open window. That is
+    /// an explicit scope cut (docs/PLATFORM.md phase P0), not a missed
+    /// requirement; migration guarantees at least one profile always exists.
+    private func openMostRecentOrDefaultProfile() {
+        guard let profiles = try? service.listProfiles(), !profiles.isEmpty else {
+            showError("No profile could be loaded or created — check that the ezcloud CLI is reachable.")
+            return
+        }
+        let mostRecent = profiles.max { $0.updatedAt < $1.updatedAt } ?? profiles[0]
+        openWindow(forProfile: mostRecent.id)
+    }
 
-/// One row in the Variables table: a section header or a reference to a `fieldRows` index.
-enum VarItem {
-    case header(VarSection)
-    case field(Int)
-}
+    /// Opens a window bound to the given profile id, reusing (and
+    /// refocusing) an already-open one rather than creating a duplicate.
+    func openWindow(forProfile id: String) {
+        if let existing = windowControllers[id] {
+            existing.show()
+            return
+        }
+        guard let profile = try? service.getProfile(id: id) else {
+            showError("That profile could not be loaded.")
+            return
+        }
+        let controller = ProfileWindowController(profile: profile, catalog: catalog, service: service)
+        windowControllers[id] = controller
+        controller.show()
+    }
 
-/// One row in the profiles sidebar: a provider group header, a profile, a
-/// "TOOLS" subheader, or one of the provider's tools/services.
-enum SidebarRow {
-    case header(provider: String, title: String, count: Int)
-    case profile(provider: String, name: String)
-    case subheader(String)
-    case tool(provider: String, id: String, title: String, symbol: String)
+    @objc func newWindowForProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        openWindow(forProfile: id)
+    }
+
+    @objc func manageProfiles() {
+        let controller = profileManagerController ?? ProfileManagerWindowController(service: service)
+        profileManagerController = controller
+        controller.show()
+    }
+
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "EZ Cloud Manager"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
 }

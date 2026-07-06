@@ -75,6 +75,8 @@ func main() {
 		profileCommand(cmd, rest)
 	case "ws":
 		wsCommand(rest)
+	case "profile":
+		profileMgmtCommand(rest)
 	case "audit":
 		auditCommand(rest)
 	case "lt":
@@ -202,6 +204,7 @@ func usage() {
   ezcloud export   [--provider ID] --profile NAME [--format env|dotenv|ini|json]
   ezcloud activate [--provider ID] --profile NAME
   ezcloud ws       list | save | delete --name NAME | rename --old A --new B
+  ezcloud profile  list|show|create|save|rename|duplicate|delete|export|import|migrate
   ezcloud audit    [--limit N]
   ezcloud lt       templates|versions|get|apply|set-default|delete-versions …
 

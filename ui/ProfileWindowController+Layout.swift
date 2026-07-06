@@ -10,19 +10,20 @@ enum UI {
     static let rowHeight: CGFloat = 34
 }
 
-extension AppDelegate {
+extension ProfileWindowController {
     func buildWindow() {
-        window = NSWindow(
+        let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.title = "EZ Cloud Manager"
-        window.minSize = NSSize(width: 920, height: 640)
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .visible
-        window.toolbarStyle = .unified
+        win.title = "EZ Cloud Manager — \(profile.name)"
+        win.minSize = NSSize(width: 920, height: 640)
+        win.titlebarAppearsTransparent = true
+        win.titleVisibility = .visible
+        win.toolbarStyle = .unified
+        self.window = win
 
         // NSSplitViewController gives an automatic full-height, vibrant sidebar
         // aligned to the transparent titlebar — the modern macOS shell.
@@ -39,10 +40,11 @@ extension AppDelegate {
         sidebarItem.holdingPriority = NSLayoutConstraint.Priority(260)
         splitVC.addSplitViewItem(sidebarItem)
         splitVC.addSplitViewItem(NSSplitViewItem(viewController: detailVC))
-        splitVC.splitView.autosaveName = "EZCloudManagerSplit"
-        window.contentViewController = splitVC
+        // Per-profile: two windows must not fight over one saved split width.
+        splitVC.splitView.autosaveName = "EZCloudManagerSplit-\(profile.id)"
+        win.contentViewController = splitVC
 
-        positionWindow()
+        positionWindow(win)
     }
 
     /// Toolbar over the detail pane: sidebar toggle, Launch Templates, Ko-fi
@@ -53,7 +55,7 @@ extension AppDelegate {
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
-        window.toolbar = toolbar
+        window?.toolbar = toolbar
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -100,22 +102,23 @@ extension AppDelegate {
         toolbarDefaultItemIdentifiers(toolbar)
     }
 
-    /// Restores the last window position (persisted across launches) and makes
-    /// sure it lands on a visible screen — a plain `center()` could place the
-    /// window off-screen on multi-display setups, or a saved frame could point
-    /// at a display that is no longer attached.
-    private func positionWindow() {
-        let autosaveName = NSWindow.FrameAutosaveName("EZCloudManagerMainWindow")
-        window.setFrameAutosaveName(autosaveName)
-        if !window.setFrameUsingName(autosaveName) {
-            window.center()
+    /// Restores this profile's last window position (persisted across
+    /// launches, one autosave name per profile id) and makes sure it lands on
+    /// a visible screen — a plain `center()` could place the window
+    /// off-screen on multi-display setups, or a saved frame could point at a
+    /// display that is no longer attached.
+    private func positionWindow(_ win: NSWindow) {
+        let autosaveName = NSWindow.FrameAutosaveName("EZCloudManagerWindow-\(profile.id)")
+        win.setFrameAutosaveName(autosaveName)
+        if !win.setFrameUsingName(autosaveName) {
+            win.center()
         }
-        guard !frameIsOnScreen(window.frame) else { return }
+        guard !frameIsOnScreen(win.frame) else { return }
 
-        window.center()
-        if !frameIsOnScreen(window.frame), let visible = NSScreen.main?.visibleFrame {
-            let size = window.frame.size
-            window.setFrameOrigin(NSPoint(
+        win.center()
+        if !frameIsOnScreen(win.frame), let visible = NSScreen.main?.visibleFrame {
+            let size = win.frame.size
+            win.setFrameOrigin(NSPoint(
                 x: visible.midX - size.width / 2,
                 y: visible.midY - size.height / 2
             ))
@@ -140,16 +143,6 @@ extension AppDelegate {
         view.state = .followsWindowActiveState
         view.translatesAutoresizingMaskIntoConstraints = false
 
-        // Workspace switcher sits above search: pick a context (client/job),
-        // and every list below is scoped to it.
-        workspacePopup = NSPopUpButton()
-        workspacePopup.controlSize = .small
-        workspacePopup.font = .systemFont(ofSize: 11)
-        workspacePopup.target = self
-        workspacePopup.action = #selector(workspacePopupChanged(_:))
-        workspacePopup.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(workspacePopup)
-
         profileSearchField = NSSearchField()
         profileSearchField.placeholderString = "Search profiles"
         profileSearchField.delegate = self
@@ -168,7 +161,6 @@ extension AppDelegate {
         profilesTable.rowSizeStyle = .medium
         profilesTable.intercellSpacing = NSSize(width: 0, height: 2)
         profilesTable.floatsGroupRows = false
-        profilesTable.menu = buildProfileContextMenu()
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile"))
         col.title = "Profile"
         col.width = 230
@@ -196,10 +188,7 @@ extension AppDelegate {
 
         NSLayoutConstraint.activate([
             // Top inset clears the transparent titlebar / traffic lights.
-            workspacePopup.topAnchor.constraint(equalTo: view.topAnchor, constant: 48),
-            workspacePopup.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            workspacePopup.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
-            profileSearchField.topAnchor.constraint(equalTo: workspacePopup.bottomAnchor, constant: 8),
+            profileSearchField.topAnchor.constraint(equalTo: view.topAnchor, constant: 48),
             profileSearchField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             profileSearchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             scroll.topAnchor.constraint(equalTo: profileSearchField.bottomAnchor, constant: 8),

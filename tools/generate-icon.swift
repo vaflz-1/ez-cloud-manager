@@ -110,17 +110,14 @@ func drawIcon(pixelSize: Int) -> NSBitmapImageRep {
     NSGraphicsContext.restoreGraphicsState()
 
     pipeline(points: [p(150, 282), p(300, 282), p(300, 392), p(452, 392)], width: 12 * scale, stroke: color(0.91, 0.98, 1.0, 0.56))
-    pipeline(points: [p(186, 748), p(326, 748), p(326, 674), p(450, 674)], width: 11 * scale, stroke: color(0.86, 0.98, 0.93, 0.48))
-    pipeline(points: [p(566, 238), p(566, 340), p(676, 340), p(676, 438)], width: 11 * scale, stroke: color(0.92, 0.94, 1.0, 0.46))
+    pipeline(points: [p(186, 748), p(326, 748), p(326, 674), p(450, 674)], width: 11 * scale, stroke: color(0.90, 0.96, 1.0, 0.50))
 
     for (center, radius, fill) in [
         (p(150, 282), 22 * scale, color(0.90, 0.98, 1.0)),
-        (p(300, 282), 16 * scale, color(0.88, 0.98, 0.88)),
+        (p(300, 282), 16 * scale, color(0.90, 0.97, 1.0)),
         (p(452, 392), 19 * scale, color(0.90, 0.98, 1.0)),
-        (p(186, 748), 19 * scale, color(0.88, 0.98, 0.88)),
-        (p(326, 674), 15 * scale, color(0.89, 0.98, 1.0)),
-        (p(566, 238), 16 * scale, color(0.93, 0.94, 1.0)),
-        (p(676, 340), 15 * scale, color(0.99, 0.92, 0.78))
+        (p(186, 748), 19 * scale, color(0.90, 0.97, 1.0)),
+        (p(326, 674), 15 * scale, color(0.89, 0.98, 1.0))
     ] {
         drawCircle(center: center, radius: radius, fill: fill, stroke: color(0.08, 0.18, 0.31, 0.34), lineWidth: 5 * scale)
     }
@@ -134,7 +131,7 @@ func drawIcon(pixelSize: Int) -> NSBitmapImageRep {
 
     pipeline(points: [p(370, 535), p(478, 535), p(522, 576), p(616, 576)], width: 9 * scale, stroke: color(0.20, 0.48, 0.68, 0.58))
     pipeline(points: [p(420, 474), p(544, 474), p(544, 526), p(662, 526)], width: 8 * scale, stroke: color(0.20, 0.48, 0.68, 0.48))
-    for center in [p(368, 534), p(522, 578), p(618, 578), p(418, 472), p(544, 528), p(664, 528)] {
+    for center in [p(370, 535), p(522, 576), p(616, 576), p(420, 474), p(544, 526), p(662, 526)] {
         drawCircle(center: center, radius: 14 * scale, fill: color(0.14, 0.43, 0.64, 0.88), stroke: color(1.0, 1.0, 1.0, 0.88), lineWidth: 4 * scale)
     }
 
@@ -162,14 +159,6 @@ func drawIcon(pixelSize: Int) -> NSBitmapImageRep {
     gearShadow.shadowBlurRadius = 10 * scale
     gearShadow.shadowOffset = NSSize(width: 0, height: -3 * scale)
     drawSymbol("gearshape.fill", in: r(640, 336, 204, 204), pointScale: 0.98, color: color(0.26, 0.35, 0.46, 0.96), shadow: gearShadow)
-
-    let shine = NSBezierPath()
-    shine.move(to: p(210, 814))
-    shine.curve(to: p(456, 868), controlPoint1: p(292, 880), controlPoint2: p(374, 892))
-    color(1, 1, 1, 0.24).setStroke()
-    shine.lineWidth = 14 * scale
-    shine.lineCapStyle = .round
-    shine.stroke()
 
     context.flushGraphics()
     NSGraphicsContext.restoreGraphicsState()

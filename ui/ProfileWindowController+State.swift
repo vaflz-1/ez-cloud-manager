@@ -1,38 +1,6 @@
 import AppKit
 
-extension AppDelegate {
-    /// Canonical provider ordering for the sidebar: the big three first,
-    /// anything registered later sorts after them.
-    static let providerOrder = ["aws", "gcp", "azure"]
-
-    /// Loads provider list + field schemas once at startup. Failure leaves the
-    /// app usable with the AWS legacy assumptions (secret-name heuristics).
-    func loadProviders() {
-        do {
-            var infos = try service.providers()
-            infos.sort { lhs, rhs in
-                let li = Self.providerOrder.firstIndex(of: lhs.id) ?? Int.max
-                let ri = Self.providerOrder.firstIndex(of: rhs.id) ?? Int.max
-                return li == ri ? lhs.id < rhs.id : li < ri
-            }
-            providers = infos
-            for info in infos {
-                schemas[info.id] = try? service.schema(provider: info.id)
-            }
-            rebuildProviderPopup()
-        } catch {
-            showError(error.localizedDescription)
-        }
-    }
-
-    func providerInfo(_ id: String) -> ProviderInfo? {
-        providers.first { $0.id == id }
-    }
-
-    func providerDisplayName(_ id: String) -> String {
-        providerInfo(id)?.displayName ?? id.uppercased()
-    }
-
+extension ProfileWindowController {
     /// Provider that owns the profile being edited: the selected profile's
     /// provider, or the provider chosen in the popup for a new profile.
     func currentEditingProvider() -> String {
@@ -45,9 +13,12 @@ extension AppDelegate {
 
     func refreshProfiles(selecting wantedName: String? = nil, provider wantedProvider: String? = nil) {
         var loadedCount = 0
-        for info in providers.isEmpty ? [ProviderInfo(id: "aws", displayName: "AWS", canActivate: false, activateLabel: nil)] : providers {
+        let infos = catalog.providers.isEmpty
+            ? [ProviderInfo(id: "aws", displayName: "AWS", canActivate: false, activateLabel: nil)]
+            : catalog.providers
+        for info in infos {
             do {
-                let response = try service.list(provider: info.id)
+                let response = try service.list(provider: info.id, extraEnv: profile.envVars.asDictionary())
                 profilesByProvider[info.id] = response.profiles.sorted {
                     $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
@@ -77,24 +48,25 @@ extension AppDelegate {
     }
 
     /// Rebuilds the sidebar rows from provider groups, applying the search
-    /// text and the active workspace filter.
+    /// text and this window's profile Accounts filter (unless the profile
+    /// shows all accounts).
     func rebuildSidebarRows() {
         let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let workspace = activeWorkspace()
+        let scoped = !profile.showAllAccounts
         var rows: [SidebarRow] = []
-        for info in providers {
+        for info in catalog.providers {
             let all = profilesByProvider[info.id] ?? []
             let visible = all.filter { summary in
-                if let workspace, !workspace.members.contains(WorkspaceMember(provider: info.id, profile: summary.name)) {
+                if scoped, !profile.accounts.contains(AccountRef(provider: info.id, account: summary.name)) {
                     return false
                 }
                 return query.isEmpty || summary.name.localizedCaseInsensitiveContains(query)
             }
             let tools = providerTools(info.id, matching: query)
-            // Hide empty provider groups while filtering/workspace-scoped so
+            // Hide empty provider groups while filtering/account-scoped so
             // the list stays dense; show them when browsing everything (an
             // empty "Azure" header is the discoverable way to add one).
-            if visible.isEmpty && tools.isEmpty && (workspace != nil || !query.isEmpty) { continue }
+            if visible.isEmpty && tools.isEmpty && (scoped || !query.isEmpty) { continue }
             rows.append(.header(provider: info.id, title: info.displayName, count: visible.count))
             rows.append(contentsOf: visible.map { .profile(provider: info.id, name: $0.name) })
             // A "TOOLS" subheader separates services from profiles so tools
@@ -121,7 +93,7 @@ extension AppDelegate {
             hiddenSelection = (selectedProvider, name)
             clearDetailForNoSelection()
             setStatus(query.isEmpty
-                ? "“\(name)” isn’t in this workspace — switch workspace to edit it"
+                ? "“\(name)” isn’t in this profile’s accounts — edit them from Manage Profiles, or turn on “show all accounts”"
                 : "“\(name)” is hidden by the filter — clear the search to restore it")
         } else if selectedProfileName == nil, let hidden = hiddenSelection,
                   let idx = sidebarIndex(ofProfile: hidden.name, provider: hidden.provider) {
@@ -158,21 +130,21 @@ extension AppDelegate {
 
     func loadProfile(provider: String, name: String) {
         do {
-            let profile = try service.get(provider: provider, name)
+            let profileResponse = try service.get(provider: provider, name, extraEnv: profile.envVars.asDictionary())
             hiddenSelection = nil // an explicit selection supersedes the remembered one
             selectedProvider = provider
-            selectedProfileName = profile.name
-            profileNameField.stringValue = profile.name
+            selectedProfileName = profileResponse.name
+            profileNameField.stringValue = profileResponse.name
             pasteView.string = ""
             lastAutoParsedPaste = ""
-            fieldRows = rows(from: profile.fields, includeEmptyRecommended: true)
+            fieldRows = rows(from: profileResponse.fields, includeEmptyRecommended: true)
             resetFieldCollapse()
             reloadFieldsTable()
             syncProviderPopup()
             updatePasteLabel()
             updateVariablesSummary()
             updateProfileMode()
-            setStatus("Loaded \(profile.name) (\(providerDisplayName(provider)))")
+            setStatus("Loaded \(profileResponse.name) (\(catalog.providerDisplayName(provider)))")
         } catch {
             showError(error.localizedDescription)
         }
@@ -195,7 +167,7 @@ extension AppDelegate {
     // MARK: - Schema-driven field knowledge
 
     func spec(for key: String) -> FieldSpec? {
-        schemas[currentEditingProvider()]?.spec(for: key)
+        catalog.schema(currentEditingProvider())?.spec(for: key)
     }
 
     /// Whether a field's value should be hidden in the UI. Schema-marked
@@ -214,7 +186,7 @@ extension AppDelegate {
 
     /// Schema keys for the editing provider, in schema (UI) order.
     func recommendedKeys() -> [String] {
-        schemas[currentEditingProvider()]?.fields.map { $0.key } ?? []
+        catalog.schema(currentEditingProvider())?.fields.map { $0.key } ?? []
     }
 
     func section(for key: String) -> VarSection {
@@ -311,7 +283,7 @@ extension AppDelegate {
     func rebuildProviderPopup() {
         guard let popup = providerPopup else { return }
         popup.removeAllItems()
-        for info in providers {
+        for info in catalog.providers {
             popup.addItem(withTitle: info.displayName)
             popup.lastItem?.representedObject = info.id
             popup.lastItem?.image = ProviderStyle.badge(info.id, height: 13)
@@ -323,7 +295,7 @@ extension AppDelegate {
     /// a new profile (a stored profile cannot move between clouds).
     func syncProviderPopup() {
         guard let popup = providerPopup else { return }
-        if let idx = providers.firstIndex(where: { $0.id == selectedProvider }) {
+        if let idx = catalog.providers.firstIndex(where: { $0.id == selectedProvider }) {
             popup.selectItem(at: idx)
         }
         popup.isEnabled = (selectedProfileName == nil)
@@ -336,12 +308,12 @@ extension AppDelegate {
     }
 
     func updatePasteLabel() {
-        pasteLabel?.stringValue = "PASTE \(providerDisplayName(currentEditingProvider()).uppercased()) CREDENTIALS OR CONFIG"
+        pasteLabel?.stringValue = "PASTE \(catalog.providerDisplayName(currentEditingProvider()).uppercased()) CREDENTIALS OR CONFIG"
     }
 
     func updateActivateButton() {
         guard let button = activateButton else { return }
-        let info = providerInfo(selectedProvider)
+        let info = catalog.providerInfo(selectedProvider)
         let visible = (info?.canActivate ?? false) && selectedProfileName != nil
         button.isHidden = !visible
         button.toolTip = info?.activateLabel

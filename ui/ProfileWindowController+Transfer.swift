@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 /// the app. Secret hygiene rules live here: clipboard exports are concealed,
 /// file exports go only where the user explicitly points, imports never
 /// auto-save.
-extension AppDelegate {
+extension ProfileWindowController {
     static let exportFormats = ["env", "dotenv", "ini", "json"]
 
     private func exportableSelection() -> (provider: String, name: String)? {
@@ -24,7 +24,7 @@ extension AppDelegate {
         guard sender.tag >= 0, sender.tag < Self.exportFormats.count else { return }
         let format = Self.exportFormats[sender.tag]
         do {
-            let text = try service.export(provider: target.provider, target.name, format: format)
+            let text = try service.export(provider: target.provider, target.name, format: format, extraEnv: profile.envVars.asDictionary())
             guard !text.isEmpty else {
                 setStatus("Nothing to export — profile has no saved values")
                 return
@@ -58,7 +58,7 @@ extension AppDelegate {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let format = Self.exportFormats[max(0, formatPopup.indexOfSelectedItem)]
         do {
-            let text = try service.export(provider: target.provider, target.name, format: format)
+            let text = try service.export(provider: target.provider, target.name, format: format, extraEnv: profile.envVars.asDictionary())
             // 0600: an exported profile is as sensitive as the store itself.
             try text.data(using: .utf8)?.write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -90,7 +90,7 @@ extension AppDelegate {
             }
             pasteView.string = text
             if !applyParsedCredentialsFromPaste(force: true, userInitiated: true) {
-                showError("No \(providerDisplayName(currentEditingProvider())) variables recognized in \(url.lastPathComponent).")
+                showError("No \(catalog.providerDisplayName(currentEditingProvider())) variables recognized in \(url.lastPathComponent).")
             }
         } catch {
             showError(error.localizedDescription)
@@ -107,7 +107,7 @@ extension AppDelegate {
         let provider = selectedProvider
         let others = (profilesByProvider[provider] ?? []).map(\.name).filter { $0 != name }
         guard !others.isEmpty else {
-            showError("No other \(providerDisplayName(provider)) profiles to compare with.")
+            showError("No other \(catalog.providerDisplayName(provider)) profiles to compare with.")
             return
         }
 
@@ -122,8 +122,9 @@ extension AppDelegate {
         guard picker.runModal() == .alertFirstButtonReturn, let otherName = popup.selectedItem?.title else { return }
 
         do {
-            let mine = try service.get(provider: provider, name).fields
-            let theirs = try service.get(provider: provider, otherName).fields
+            let extraEnv = profile.envVars.asDictionary()
+            let mine = try service.get(provider: provider, name, extraEnv: extraEnv).fields
+            let theirs = try service.get(provider: provider, otherName, extraEnv: extraEnv).fields
             let diff = diffGroups(old: mine, new: theirs)
             let total = diff.added.count + diff.changed.count + diff.removed.count
 
@@ -145,7 +146,7 @@ extension AppDelegate {
     /// Provider-native "make this the active/default profile", with an
     /// explicit explanation of what will actually happen.
     @objc func activateProfile() {
-        guard let name = selectedProfileName, let info = providerInfo(selectedProvider), info.canActivate else { return }
+        guard let name = selectedProfileName, let info = catalog.providerInfo(selectedProvider), info.canActivate else { return }
 
         let alert = NSAlert()
         alert.messageText = info.activateLabel ?? "Set active profile"
@@ -162,9 +163,9 @@ extension AppDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         do {
-            try service.activate(provider: selectedProvider, name)
+            try service.activate(provider: selectedProvider, name, extraEnv: profile.envVars.asDictionary())
             refreshProfiles()
-            setStatus("\(name) is now active (\(providerDisplayName(selectedProvider)))")
+            setStatus("\(name) is now active (\(catalog.providerDisplayName(selectedProvider)))")
         } catch {
             showError(error.localizedDescription)
         }
@@ -173,16 +174,16 @@ extension AppDelegate {
     // MARK: - Ko-fi & Launch Templates entry points
 
     @objc func openKoFi() {
-        NSWorkspace.shared.open(Self.koFiURL)
+        NSWorkspace.shared.open(AppDelegate.koFiURL)
     }
 
     @objc func openLaunchTemplates() {
-        guard selectedProvider == "aws", let profile = selectedProfileName else {
+        guard selectedProvider == "aws", let profileName = selectedProfileName else {
             showError("Select an AWS profile first — Launch Templates are read with its credentials.")
             return
         }
         let region = fieldRows.first { $0.key == "region" }?.value.trimmingCharacters(in: .whitespacesAndNewlines)
-        presentLaunchTemplates(profile: profile, region: region)
+        presentLaunchTemplates(profile: profileName, region: region)
     }
 
     /// A tool row in the sidebar was activated. Tools open in their own
@@ -198,7 +199,7 @@ extension AppDelegate {
                 let region = fieldRows.first { $0.key == "region" }?.value.trimmingCharacters(in: .whitespacesAndNewlines)
                 presentLaunchTemplates(profile: name, region: region)
             } else if let first = (profilesByProvider["aws"] ?? []).first?.name {
-                let region = (try? service.get(provider: "aws", first))?.fields["region"]
+                let region = (try? service.get(provider: "aws", first, extraEnv: self.profile.envVars.asDictionary()))?.fields["region"]
                 presentLaunchTemplates(profile: first, region: region)
             } else {
                 showError("Add an AWS profile first — Launch Templates are read with its credentials.")
@@ -208,11 +209,13 @@ extension AppDelegate {
         }
     }
 
-    private func presentLaunchTemplates(profile: String, region: String?) {
+    /// Retains this window's own Launch Templates window — one per profile
+    /// window, so two windows never fight over one AWS-account-bound session.
+    private func presentLaunchTemplates(profile profileName: String, region: String?) {
         let controller = launchTemplatesController ?? LaunchTemplatesWindowController(service: service)
         launchTemplatesController = controller
         let resolved = (region?.isEmpty == false) ? region! : "us-east-1"
-        controller.present(profile: profile, region: resolved)
+        controller.present(profile: profileName, region: resolved)
     }
 
     /// Puts the sidebar selection back on the loaded profile (or clears it)

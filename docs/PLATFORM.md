@@ -23,6 +23,22 @@ Goals, in the user's words:
 - Don't fear growing the UI. The skeleton stays small; plugins grow it.
 - Jenkins/VS Code-grade standards for plugin lifecycle and extension API.
 
+## UX principles (binding, July 2026)
+
+1. **Menu bar is minimal and basic.** Every menu-bar action must also be
+   reachable from the in-window UI; menus mirror the interface, they never
+   hold exclusive functionality.
+2. **Empty skeleton first.** On first run the app looks deliberately
+   empty: profile selector, settings, and a plugin hub that offers
+   installing plugins. The platform identity must be visible in the first
+   minute of use.
+3. **Plugins open separately.** Each plugin presents as a module/card in
+   the hub and opens in its own window or clearly bounded section — never
+   silently woven into a monolithic main window.
+4. **Low-code for DevOps.** The end state is a graphical environment
+   covering the full vendor-CLI capability surface; every flow favors
+   visual, declarative interaction over memorizing CLI incantations.
+
 ## Core vs. plugins
 
 **Core (the skeleton)** contains ONLY:

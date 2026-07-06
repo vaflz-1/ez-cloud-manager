@@ -1,6 +1,6 @@
 import AppKit
 
-extension AppDelegate {
+extension ProfileWindowController {
     @objc func refreshTapped() {
         refreshProfiles()
     }
@@ -22,7 +22,7 @@ extension AppDelegate {
         updatePasteLabel()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(providerDisplayName(currentEditingProvider())) profile")
+        setStatus("New \(catalog.providerDisplayName(currentEditingProvider())) profile")
     }
 
     @objc func providerPopupChanged(_ sender: NSPopUpButton) {
@@ -35,7 +35,7 @@ extension AppDelegate {
         updatePasteLabel()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(providerDisplayName(id)) profile")
+        setStatus("New \(catalog.providerDisplayName(id)) profile")
     }
 
     @objc func deleteProfile() {
@@ -48,7 +48,7 @@ extension AppDelegate {
 
         let path = pathsByProvider[provider] ?? "the provider's store"
         let alert = NSAlert()
-        alert.messageText = "Delete \(providerDisplayName(provider)) profile?"
+        alert.messageText = "Delete \(catalog.providerDisplayName(provider)) profile?"
         alert.informativeText = "Profile \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
@@ -57,7 +57,7 @@ extension AppDelegate {
         }
 
         do {
-            try service.delete(provider: provider, name)
+            try service.delete(provider: provider, name, extraEnv: profile.envVars.asDictionary())
             selectedProfileName = nil
             refreshProfiles()
             clearDetailForNoSelection()
@@ -69,7 +69,7 @@ extension AppDelegate {
 
     @objc func parsePastedCredentials() {
         if !applyParsedCredentialsFromPaste(force: true, userInitiated: true) {
-            showError("No \(providerDisplayName(currentEditingProvider())) variables found in the pasted text.")
+            showError("No \(catalog.providerDisplayName(currentEditingProvider())) variables found in the pasted text.")
         }
     }
 
@@ -90,7 +90,7 @@ extension AppDelegate {
         }
 
         do {
-            let parsed = try service.parse(provider: currentEditingProvider(), text)
+            let parsed = try service.parse(provider: currentEditingProvider(), text, extraEnv: profile.envVars.asDictionary())
             guard !parsed.fields.isEmpty else {
                 return false
             }
@@ -136,7 +136,7 @@ extension AppDelegate {
             fieldsTable.selectRowIndexes(IndexSet(integer: disp), byExtendingSelection: false)
             fieldsTable.scrollRowToVisible(disp)
             if let keyField = fieldsTable.view(atColumn: 0, row: disp, makeIfNecessary: true) as? NSTextField {
-                window.makeFirstResponder(keyField)
+                window?.makeFirstResponder(keyField)
             }
         }
         updateVariablesSummary()
@@ -185,7 +185,7 @@ extension AppDelegate {
                 setStatus("Save cancelled")
                 return
             }
-            try service.save(provider: provider, name, fields: fields)
+            try service.save(provider: provider, name, fields: fields, extraEnv: profile.envVars.asDictionary())
             let savedCount = fields.values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
             selectedProvider = provider
             refreshProfiles(selecting: name, provider: provider)
@@ -229,7 +229,7 @@ extension AppDelegate {
     func confirmOverwrite(provider: String, name: String, newFields: [String: String]) -> Bool {
         let current: [String: String]
         do {
-            current = try service.get(provider: provider, name).fields
+            current = try service.get(provider: provider, name, extraEnv: profile.envVars.asDictionary()).fields
         } catch {
             return true // can't read current state; fall back to a plain save
         }
@@ -335,7 +335,7 @@ extension AppDelegate {
     }
 
     func commitActiveEdits() {
-        window.makeFirstResponder(nil)
+        window?.makeFirstResponder(nil)
         fieldsTable.window?.makeFirstResponder(nil)
         fieldsTable.validateEditing()
         profileNameField.validateEditing()

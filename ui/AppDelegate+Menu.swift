@@ -21,28 +21,46 @@ extension AppDelegate {
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
-        let newItem = NSMenuItem(title: "New Profile", action: #selector(addProfile), keyEquivalent: "n")
-        newItem.target = self
+
+        // Profile (the new global container) management — app-global, so
+        // these targets stay `self` (AppDelegate).
+        let newWindowItem = NSMenuItem(title: "New Window with Profile", action: nil, keyEquivalent: "")
+        let newWindowSubmenu = NSMenu()
+        newWindowSubmenu.delegate = self
+        newWindowItem.submenu = newWindowSubmenu
+        fileMenu.addItem(newWindowItem)
+        let manageItem = NSMenuItem(title: "Manage Profiles…", action: #selector(manageProfiles), keyEquivalent: ",")
+        manageItem.target = self
+        fileMenu.addItem(manageItem)
+        fileMenu.addItem(.separator())
+
+        // Everything below acts on ONE profile window's credential-entry
+        // editor. `target = nil` routes each command through the responder
+        // chain (key window → its ProfileWindowController) instead of a
+        // fixed target — required now that these actions live on
+        // ProfileWindowController, not AppDelegate.
+        let newItem = NSMenuItem(title: "New Profile", action: #selector(ProfileWindowController.addProfile), keyEquivalent: "n")
+        newItem.target = nil
         fileMenu.addItem(newItem)
-        let saveItem = NSMenuItem(title: "Save Profile", action: #selector(saveProfile), keyEquivalent: "s")
-        saveItem.target = self
+        let saveItem = NSMenuItem(title: "Save Profile", action: #selector(ProfileWindowController.saveProfile), keyEquivalent: "s")
+        saveItem.target = nil
         fileMenu.addItem(saveItem)
-        let refreshItem = NSMenuItem(title: "Refresh Profiles", action: #selector(refreshTapped), keyEquivalent: "r")
-        refreshItem.target = self
+        let refreshItem = NSMenuItem(title: "Refresh Profiles", action: #selector(ProfileWindowController.refreshTapped), keyEquivalent: "r")
+        refreshItem.target = nil
         fileMenu.addItem(refreshItem)
         fileMenu.addItem(.separator())
-        let importItem = NSMenuItem(title: "Import File…", action: #selector(importFromFile), keyEquivalent: "i")
-        importItem.target = self
+        let importItem = NSMenuItem(title: "Import File…", action: #selector(ProfileWindowController.importFromFile), keyEquivalent: "i")
+        importItem.target = nil
         fileMenu.addItem(importItem)
-        let exportItem = NSMenuItem(title: "Export to File…", action: #selector(exportToFile), keyEquivalent: "e")
-        exportItem.target = self
+        let exportItem = NSMenuItem(title: "Export to File…", action: #selector(ProfileWindowController.exportToFile), keyEquivalent: "e")
+        exportItem.target = nil
         fileMenu.addItem(exportItem)
-        let compareItem = NSMenuItem(title: "Compare Profiles…", action: #selector(compareProfiles), keyEquivalent: "d")
-        compareItem.target = self
+        let compareItem = NSMenuItem(title: "Compare Profiles…", action: #selector(ProfileWindowController.compareProfiles), keyEquivalent: "d")
+        compareItem.target = nil
         fileMenu.addItem(compareItem)
         fileMenu.addItem(.separator())
-        let ltItem = NSMenuItem(title: "EC2 Launch Templates…", action: #selector(openLaunchTemplates), keyEquivalent: "l")
-        ltItem.target = self
+        let ltItem = NSMenuItem(title: "EC2 Launch Templates…", action: #selector(ProfileWindowController.openLaunchTemplates), keyEquivalent: "l")
+        ltItem.target = nil
         fileMenu.addItem(ltItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
@@ -65,10 +83,34 @@ extension AppDelegate {
         mainMenu.addItem(helpMenuItem)
         let helpMenu = NSMenu(title: "Help")
         helpMenuItem.submenu = helpMenu
-        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(openKoFi), keyEquivalent: "")
-        koFiItem.target = self
+        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(ProfileWindowController.openKoFi), keyEquivalent: "")
+        koFiItem.target = nil
         helpMenu.addItem(koFiItem)
 
         NSApp.mainMenu = mainMenu
+    }
+}
+
+/// Rebuilds the "New Window with Profile" submenu live every time the File
+/// menu opens, so it always reflects the current profile list — the same
+/// dynamic-menu pattern the old workspace popup used.
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let profiles = try? service.listProfiles(), !profiles.isEmpty else {
+            let hint = NSMenuItem(title: "No profiles yet — use Manage Profiles…", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
+            return
+        }
+        for p in profiles.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
+            let item = NSMenuItem(title: p.name, action: #selector(newWindowForProfile(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = p.id
+            if windowControllers[p.id] != nil {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
     }
 }

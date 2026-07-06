@@ -45,52 +45,44 @@ final class CredentialsService {
     }
 
     // MARK: - Profile operations
+    //
+    // Every call below takes an `extraEnv` the caller resolves from the
+    // owning window's Profile (`profile.envVars.asDictionary()`) — this is
+    // what makes two windows on two profiles behave with independent env
+    // (e.g. a different AWS_SHARED_CREDENTIALS_FILE or default region),
+    // not just independent Accounts filtering. It defaults to empty so
+    // callers with no profile context (tests, tools) are unaffected.
 
-    func list(provider: String) throws -> ListResponse {
-        try decode(run(["list", "--provider", provider], input: nil))
+    func list(provider: String, extraEnv: [String: String] = [:]) throws -> ListResponse {
+        try decode(run(["list", "--provider", provider], input: nil, extraEnv: extraEnv))
     }
 
-    func get(provider: String, _ name: String) throws -> ProfileResponse {
-        try decode(run(["get", "--provider", provider, "--profile", name], input: nil))
+    func get(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws -> ProfileResponse {
+        try decode(run(["get", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv))
     }
 
-    func parse(provider: String, _ text: String) throws -> ParseResponse {
-        try decode(run(["parse", "--provider", provider], input: text))
+    func parse(provider: String, _ text: String, extraEnv: [String: String] = [:]) throws -> ParseResponse {
+        try decode(run(["parse", "--provider", provider], input: text, extraEnv: extraEnv))
     }
 
-    func delete(provider: String, _ name: String) throws {
-        _ = try run(["delete", "--provider", provider, "--profile", name], input: nil)
+    func delete(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws {
+        _ = try run(["delete", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
     }
 
-    func save(provider: String, _ name: String, fields: [String: String]) throws {
+    func save(provider: String, _ name: String, fields: [String: String], extraEnv: [String: String] = [:]) throws {
         let payload = try JSONEncoder().encode(SaveRequest(fields: fields))
-        _ = try run(["save", "--provider", provider, "--profile", name], inputData: payload)
+        _ = try run(["save", "--provider", provider, "--profile", name], inputData: payload, extraEnv: extraEnv)
     }
 
     /// Raw text export (env / dotenv / ini / json). The caller owns secret
     /// hygiene: use the concealed pasteboard type or a user-chosen file.
-    func export(provider: String, _ name: String, format: String) throws -> String {
-        let data = try run(["export", "--provider", provider, "--profile", name, "--format", format], input: nil)
+    func export(provider: String, _ name: String, format: String, extraEnv: [String: String] = [:]) throws -> String {
+        let data = try run(["export", "--provider", provider, "--profile", name, "--format", format], input: nil, extraEnv: extraEnv)
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    func activate(provider: String, _ name: String) throws {
-        _ = try run(["activate", "--provider", provider, "--profile", name], input: nil)
-    }
-
-    // MARK: - Workspaces
-
-    func workspaces() throws -> [Workspace] {
-        try decode(run(["ws", "list"], input: nil))
-    }
-
-    func saveWorkspace(_ workspace: Workspace) throws {
-        let payload = try JSONEncoder().encode(workspace)
-        _ = try run(["ws", "save"], inputData: payload)
-    }
-
-    func deleteWorkspace(_ name: String) throws {
-        _ = try run(["ws", "delete", "--name", name], input: nil)
+    func activate(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws {
+        _ = try run(["activate", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
     }
 
     // MARK: - Process plumbing
@@ -99,11 +91,11 @@ final class CredentialsService {
         try JSONDecoder().decode(T.self, from: data)
     }
 
-    func run(_ args: [String], input: String?) throws -> Data {
-        try run(args, inputData: input?.data(using: .utf8))
+    func run(_ args: [String], input: String?, extraEnv: [String: String] = [:]) throws -> Data {
+        try run(args, inputData: input?.data(using: .utf8), extraEnv: extraEnv)
     }
 
-    func run(_ args: [String], inputData: Data?) throws -> Data {
+    func run(_ args: [String], inputData: Data?, extraEnv: [String: String] = [:]) throws -> Data {
         let process = Process()
         let output = Pipe()
         let errorPipe = Pipe()
@@ -113,7 +105,7 @@ final class CredentialsService {
         process.standardOutput = output
         process.standardError = errorPipe
         process.standardInput = input
-        process.environment = Self.childEnvironment()
+        process.environment = Self.childEnvironment(extraEnv: extraEnv)
 
         try process.run()
         if let inputData {
@@ -147,10 +139,17 @@ final class CredentialsService {
 
     /// Environment for the child CLI. Inherits the caller's environment (so
     /// AWS_SHARED_CREDENTIALS_FILE and the real HOME keep working for whichever
-    /// user is running the app) while pinning a safe, minimal PATH plus the
-    /// Homebrew locations where the aws CLI is typically installed.
-    static func childEnvironment() -> [String: String] {
+    /// user is running the app), then layers the owning window's profile env
+    /// vars on top, then pins a safe, minimal PATH plus the Homebrew locations
+    /// where the aws CLI is typically installed. Profiles can no longer store
+    /// PATH (or any hijack var — internal/profile/validate.go hard-rejects them
+    /// at Create/Save/Import), so pinning PATH last here is defense-in-depth
+    /// for vendor-CLI discovery, not the primary guard.
+    static func childEnvironment(extraEnv: [String: String] = [:]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        for (key, value) in extraEnv {
+            env[key] = value
+        }
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         return env
     }
