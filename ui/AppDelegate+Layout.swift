@@ -45,7 +45,9 @@ extension AppDelegate {
         positionWindow()
     }
 
-    /// Toolbar over the detail pane: sidebar toggle + refresh (search stays in the sidebar).
+    /// Toolbar over the detail pane: sidebar toggle, Launch Templates, Ko-fi
+    /// and refresh. The heart is deliberately the quiet accent at the far
+    /// right — visible on every launch, in nobody's way.
     func configureToolbar() {
         let toolbar = NSToolbar(identifier: "EZCloudMainToolbar")
         toolbar.delegate = self
@@ -55,7 +57,8 @@ extension AppDelegate {
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if itemIdentifier == .init("refresh") {
+        switch itemIdentifier.rawValue {
+        case "refresh":
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Refresh"
             item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")
@@ -63,12 +66,34 @@ extension AppDelegate {
             item.action = #selector(refreshTapped)
             item.isBordered = true
             return item
+        case "launchTemplates":
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "EC2 Launch Templates"
+            item.toolTip = "Edit EC2 Launch Templates like plain configs (AWS profile required)"
+            item.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "EC2 Launch Templates")
+            item.target = self
+            item.action = #selector(openLaunchTemplates)
+            item.isBordered = true
+            return item
+        case "kofi":
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Support"
+            item.toolTip = "Enjoying EZ Cloud Manager? Support it on Ko-fi ♥"
+            let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+            let heart = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: "Support on Ko-fi")?
+                .withSymbolConfiguration(cfg)
+            let button = PulsingHeartButton(image: heart ?? NSImage(), target: self, action: #selector(openKoFi))
+            button.isBordered = false
+            button.contentTintColor = NSColor.systemPink
+            item.view = button
+            return item
+        default:
+            return nil
         }
-        return nil
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .flexibleSpace, .init("refresh")]
+        [.toggleSidebar, .flexibleSpace, .init("launchTemplates"), .init("refresh"), .init("kofi")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -115,6 +140,16 @@ extension AppDelegate {
         view.state = .followsWindowActiveState
         view.translatesAutoresizingMaskIntoConstraints = false
 
+        // Workspace switcher sits above search: pick a context (client/job),
+        // and every list below is scoped to it.
+        workspacePopup = NSPopUpButton()
+        workspacePopup.controlSize = .small
+        workspacePopup.font = .systemFont(ofSize: 11)
+        workspacePopup.target = self
+        workspacePopup.action = #selector(workspacePopupChanged(_:))
+        workspacePopup.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(workspacePopup)
+
         profileSearchField = NSSearchField()
         profileSearchField.placeholderString = "Search profiles"
         profileSearchField.delegate = self
@@ -132,6 +167,8 @@ extension AppDelegate {
         profilesTable.backgroundColor = .clear
         profilesTable.rowSizeStyle = .medium
         profilesTable.intercellSpacing = NSSize(width: 0, height: 2)
+        profilesTable.floatsGroupRows = false
+        profilesTable.menu = buildProfileContextMenu()
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile"))
         col.title = "Profile"
         col.width = 230
@@ -159,7 +196,10 @@ extension AppDelegate {
 
         NSLayoutConstraint.activate([
             // Top inset clears the transparent titlebar / traffic lights.
-            profileSearchField.topAnchor.constraint(equalTo: view.topAnchor, constant: 52),
+            workspacePopup.topAnchor.constraint(equalTo: view.topAnchor, constant: 48),
+            workspacePopup.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            workspacePopup.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            profileSearchField.topAnchor.constraint(equalTo: workspacePopup.bottomAnchor, constant: 8),
             profileSearchField.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             profileSearchField.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
             scroll.topAnchor.constraint(equalTo: profileSearchField.bottomAnchor, constant: 8),
@@ -211,13 +251,29 @@ extension AppDelegate {
         let view = NSView()
         view.translatesAutoresizingMaskIntoConstraints = false
 
-        // ── Card 1 · Profile name ───────────────────────────────────────────
+        // ── Card 1 · Profile name + provider ────────────────────────────────
         let profileCard = makeCard()
         view.addSubview(profileCard)
         let c1 = profileCard.contentView!
 
-        let nameLabel = sectionCaption("PROFILE NAME")
+        // Leading accent stripe in the editing provider's brand color — ties
+        // the detail pane back to the sidebar's color coding at a glance.
+        profileCardStripe = NSView()
+        profileCardStripe.wantsLayer = true
+        profileCardStripe.layer?.cornerRadius = 1.5
+        profileCardStripe.translatesAutoresizingMaskIntoConstraints = false
+        c1.addSubview(profileCardStripe)
+
+        let nameLabel = sectionCaption("PROFILE")
         c1.addSubview(nameLabel)
+
+        providerPopup = NSPopUpButton()
+        providerPopup.controlSize = .small
+        providerPopup.font = .systemFont(ofSize: 11)
+        providerPopup.target = self
+        providerPopup.action = #selector(providerPopupChanged(_:))
+        providerPopup.translatesAutoresizingMaskIntoConstraints = false
+        c1.addSubview(providerPopup)
 
         profileModeLabel = NSTextField(labelWithString: "New profile")
         profileModeLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -237,8 +293,14 @@ extension AppDelegate {
         view.addSubview(pasteCard)
         let c2 = pasteCard.contentView!
 
-        let pasteLabel = sectionCaption("PASTE AWS CREDENTIALS OR CONFIG")
+        pasteLabel = sectionCaption("PASTE AWS CREDENTIALS OR CONFIG")
         c2.addSubview(pasteLabel)
+
+        let importButton = roundedButton(title: "Import File…", systemImage: "square.and.arrow.down", action: #selector(importFromFile))
+        importButton.controlSize = .small
+        importButton.font = .systemFont(ofSize: 11)
+        importButton.translatesAutoresizingMaskIntoConstraints = false
+        c2.addSubview(importButton)
 
         let pasteScroll = NSScrollView()
         pasteScroll.hasVerticalScroller = true
@@ -302,19 +364,45 @@ extension AppDelegate {
         let addVariableButton = roundedButton(title: "Add", systemImage: "plus", action: #selector(addVariable))
         let removeVariableButton = roundedButton(title: "Remove", systemImage: "minus", action: #selector(removeVariable))
         let copyValueButton = roundedButton(title: "Copy value", systemImage: "doc.on.doc", action: #selector(copyFieldValue))
-        let editorButtons = NSStackView(views: [addVariableButton, removeVariableButton, copyValueButton])
+        let compareButton = roundedButton(title: "Compare…", systemImage: "arrow.left.arrow.right", action: #selector(compareProfiles))
+
+        // Export is a pull-down: formats target the clipboard (concealed),
+        // "Save to File…" writes wherever the user picks.
+        exportButton = NSPopUpButton()
+        exportButton.pullsDown = true
+        exportButton.addItem(withTitle: "Export")
+        for (title, tag) in [("Copy as shell exports", 0), ("Copy as .env", 1), ("Copy as INI", 2), ("Copy as JSON", 3)] {
+            let item = NSMenuItem(title: title, action: #selector(exportTapped(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            exportButton.menu?.addItem(item)
+        }
+        exportButton.menu?.addItem(.separator())
+        let saveToFile = NSMenuItem(title: "Save to File…", action: #selector(exportToFile), keyEquivalent: "")
+        saveToFile.target = self
+        exportButton.menu?.addItem(saveToFile)
+        exportButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let editorButtons = NSStackView(views: [addVariableButton, removeVariableButton, copyValueButton, compareButton, exportButton])
         editorButtons.orientation = .horizontal
         editorButtons.spacing = 8
         editorButtons.translatesAutoresizingMaskIntoConstraints = false
         c3.addSubview(editorButtons)
 
-        // ── Footer · status + primary action ────────────────────────────────
+        // ── Footer · status + activate + primary action ─────────────────────
         statusLabel = NSTextField(labelWithString: "Ready")
         statusLabel.font = .systemFont(ofSize: 11, weight: .regular)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
+
+        activateButton = NSButton(title: "Set Active", target: self, action: #selector(activateProfile))
+        activateButton.bezelStyle = .rounded
+        activateButton.controlSize = .large
+        activateButton.isHidden = true
+        activateButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(activateButton)
 
         saveButton = NSButton(title: "Save Profile", target: self, action: #selector(saveProfile))
         saveButton.bezelStyle = .push
@@ -328,11 +416,17 @@ extension AppDelegate {
             profileCard.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: UI.pad),
             profileCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
             profileCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
+            profileCardStripe.leadingAnchor.constraint(equalTo: c1.leadingAnchor, constant: -UI.cardPad + 4),
+            profileCardStripe.topAnchor.constraint(equalTo: c1.topAnchor, constant: -4),
+            profileCardStripe.bottomAnchor.constraint(equalTo: c1.bottomAnchor, constant: 4),
+            profileCardStripe.widthAnchor.constraint(equalToConstant: 3),
             nameLabel.topAnchor.constraint(equalTo: c1.topAnchor),
             nameLabel.leadingAnchor.constraint(equalTo: c1.leadingAnchor),
+            providerPopup.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
+            providerPopup.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 10),
             profileModeLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
             profileModeLabel.trailingAnchor.constraint(equalTo: c1.trailingAnchor),
-            profileModeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: nameLabel.trailingAnchor, constant: 12),
+            profileModeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: providerPopup.trailingAnchor, constant: 12),
             profileNameField.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: UI.labelGap),
             profileNameField.leadingAnchor.constraint(equalTo: c1.leadingAnchor),
             profileNameField.trailingAnchor.constraint(equalTo: c1.trailingAnchor),
@@ -344,6 +438,8 @@ extension AppDelegate {
             pasteCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
             pasteLabel.topAnchor.constraint(equalTo: c2.topAnchor),
             pasteLabel.leadingAnchor.constraint(equalTo: c2.leadingAnchor),
+            importButton.centerYAnchor.constraint(equalTo: pasteLabel.centerYAnchor),
+            importButton.trailingAnchor.constraint(equalTo: c2.trailingAnchor),
             pasteScroll.topAnchor.constraint(equalTo: pasteLabel.bottomAnchor, constant: UI.labelGap),
             pasteScroll.leadingAnchor.constraint(equalTo: c2.leadingAnchor),
             pasteScroll.trailingAnchor.constraint(equalTo: c2.trailingAnchor),
@@ -373,9 +469,11 @@ extension AppDelegate {
             saveButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
             saveButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -UI.pad),
             saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 130),
+            activateButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -10),
+            activateButton.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
             statusLabel.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: saveButton.leadingAnchor, constant: -12)
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: activateButton.leadingAnchor, constant: -12)
         ])
 
         clearDetailForNoSelection()

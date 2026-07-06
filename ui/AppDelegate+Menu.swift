@@ -31,6 +31,20 @@ extension AppDelegate {
         refreshItem.target = self
         fileMenu.addItem(refreshItem)
         fileMenu.addItem(.separator())
+        let importItem = NSMenuItem(title: "Import File…", action: #selector(importFromFile), keyEquivalent: "i")
+        importItem.target = self
+        fileMenu.addItem(importItem)
+        let exportItem = NSMenuItem(title: "Export to File…", action: #selector(exportToFile), keyEquivalent: "e")
+        exportItem.target = self
+        fileMenu.addItem(exportItem)
+        let compareItem = NSMenuItem(title: "Compare Profiles…", action: #selector(compareProfiles), keyEquivalent: "d")
+        compareItem.target = self
+        fileMenu.addItem(compareItem)
+        fileMenu.addItem(.separator())
+        let ltItem = NSMenuItem(title: "EC2 Launch Templates…", action: #selector(openLaunchTemplates), keyEquivalent: "l")
+        ltItem.target = self
+        fileMenu.addItem(ltItem)
+        fileMenu.addItem(.separator())
         fileMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
 
         let editMenuItem = NSMenuItem()
@@ -46,6 +60,14 @@ extension AppDelegate {
         editMenu.addItem(NSMenuItem(title: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: ""))
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+        let helpMenu = NSMenu(title: "Help")
+        helpMenuItem.submenu = helpMenu
+        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(openKoFi), keyEquivalent: "")
+        koFiItem.target = self
+        helpMenu.addItem(koFiItem)
 
         NSApp.mainMenu = mainMenu
     }

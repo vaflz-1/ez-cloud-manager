@@ -3,7 +3,15 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="EZ Cloud Manager.app"
-APP_PATH="/Users/octavian/Applications/$APP_NAME"
+# Install system-wide so the app shows up in Finder → Applications, Launchpad
+# and Spotlight. Falls back to ~/Applications if /Applications is not writable.
+APP_DIR="/Applications"
+if [ ! -w "$APP_DIR" ]; then
+  APP_DIR="$HOME/Applications"
+  echo "warning: /Applications not writable — installing to $APP_DIR instead"
+fi
+APP_PATH="$APP_DIR/$APP_NAME"
+HOME_APP_PATH="$HOME/Applications/$APP_NAME"
 OLD_APP_PATH="/Users/octavian/Applications/Cloud EZ Manager.app"
 LEGACY_APP_PATH="/Users/octavian/Applications/AWS Profile Manager.app"
 BUILD_ROOT="${TMPDIR:-/tmp}/ez-cloud-manager-build"
@@ -45,6 +53,11 @@ codesign --verify --deep --strict --verbose=2 "$BUILD_APP"
 codesign --display --entitlements - "$BUILD_APP" 2>/dev/null | grep -q get-task-allow && echo "hardened runtime + entitlements applied"
 
 rm -rf "$APP_PATH" "$OLD_APP_PATH" "$LEGACY_APP_PATH"
+# Drop a stale copy in ~/Applications when installing system-wide, so Spotlight
+# never launches an outdated build.
+if [ "$APP_PATH" != "$HOME_APP_PATH" ]; then
+  rm -rf "$HOME_APP_PATH"
+fi
 mv "$BUILD_APP" "$APP_PATH"
 touch "$APP_PATH"
 if [ -x "$LSREGISTER" ]; then

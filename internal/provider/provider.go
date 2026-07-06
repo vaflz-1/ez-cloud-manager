@@ -28,6 +28,45 @@ type Profile struct {
 type Parsed struct {
 	ProfileName string            `json:"profileName,omitempty"`
 	Fields      map[string]string `json:"fields"`
+	// Notes surfaces parser decisions the user must know about, e.g.
+	// "private_key ignored — keep service account keys in a file".
+	Notes []string `json:"notes,omitempty"`
+}
+
+// FieldSpec describes one known profile field so the UI can render it without
+// hardcoding provider knowledge: labels, secret masking, grouping, env-var
+// export names and placeholder examples all come from the provider.
+type FieldSpec struct {
+	// Key is the storage key (e.g. "aws_secret_access_key", "core.project").
+	Key string `json:"key"`
+	// Display is the label shown in the UI (often the canonical env-var name).
+	Display string `json:"display"`
+	// Env is the environment variable this field exports to ("" = ini-only).
+	Env string `json:"env,omitempty"`
+	// Secret marks values that must be masked in UI, logs and diffs.
+	Secret bool `json:"secret,omitempty"`
+	// Common marks fields shown in the always-visible section of the editor.
+	Common bool `json:"common,omitempty"`
+	// Placeholder is a muted example value for empty fields.
+	Placeholder string `json:"placeholder,omitempty"`
+}
+
+// Schema is a provider's full field catalog plus identity, in UI order.
+type Schema struct {
+	Provider    string      `json:"provider"`
+	DisplayName string      `json:"displayName"`
+	Fields      []FieldSpec `json:"fields"`
+}
+
+// SecretKeys returns the set of keys marked Secret, for redaction call sites.
+func (s Schema) SecretKeys() map[string]bool {
+	out := map[string]bool{}
+	for _, f := range s.Fields {
+		if f.Secret {
+			out[f.Key] = true
+		}
+	}
+	return out
 }
 
 // Provider abstracts a credential backend. Implementations own their storage
@@ -49,6 +88,19 @@ type Provider interface {
 	Delete(path, name string) error
 	// Parse extracts profile fields from a pasted credentials/config blob.
 	Parse(text string) Parsed
+	// Schema describes the provider's known fields for schema-driven UIs.
+	Schema() Schema
+}
+
+// Activator is an optional capability: providers that have a native notion of
+// an "active"/default profile (gcloud configurations, the AWS default profile)
+// implement it so the UI can offer a one-click switch.
+type Activator interface {
+	// Activate makes the named profile the provider's active/default one.
+	Activate(path, name string) error
+	// ActivateLabel is the human-facing action name (e.g. "Set as gcloud
+	// active configuration").
+	ActivateLabel() string
 }
 
 var (

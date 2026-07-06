@@ -10,6 +10,7 @@ extension AppDelegate {
     }
 
     @objc func addProfile() {
+        // Keep the provider of whatever group the user was looking at.
         selectedProfileName = nil
         profileNameField.stringValue = ""
         pasteView.string = ""
@@ -17,21 +18,38 @@ extension AppDelegate {
         fieldRows = standardEmptyRows()
         resetFieldCollapse()
         reloadFieldsTable()
+        syncProviderPopup()
+        updatePasteLabel()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New profile")
+        setStatus("New \(providerDisplayName(currentEditingProvider())) profile")
+    }
+
+    @objc func providerPopupChanged(_ sender: NSPopUpButton) {
+        guard selectedProfileName == nil else { return }
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        selectedProvider = id
+        fieldRows = standardEmptyRows()
+        resetFieldCollapse()
+        reloadFieldsTable()
+        updatePasteLabel()
+        updateVariablesSummary()
+        updateProfileMode()
+        setStatus("New \(providerDisplayName(id)) profile")
     }
 
     @objc func deleteProfile() {
+        let provider = currentEditingProvider()
         let name = selectedProfileName ?? profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
             showError("Select a profile first.")
             return
         }
 
+        let path = pathsByProvider[provider] ?? "the provider's store"
         let alert = NSAlert()
-        alert.messageText = "Delete AWS profile?"
-        alert.informativeText = "Profile \"\(name)\" will be removed from ~/.aws/credentials. A timestamped backup is created before writing."
+        alert.messageText = "Delete \(providerDisplayName(provider)) profile?"
+        alert.informativeText = "Profile \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
@@ -39,7 +57,7 @@ extension AppDelegate {
         }
 
         do {
-            try service.delete(name)
+            try service.delete(provider: provider, name)
             selectedProfileName = nil
             refreshProfiles()
             clearDetailForNoSelection()
@@ -51,7 +69,7 @@ extension AppDelegate {
 
     @objc func parsePastedCredentials() {
         if !applyParsedCredentialsFromPaste(force: true, userInitiated: true) {
-            showError("No AWS credential variables found in the pasted text.")
+            showError("No \(providerDisplayName(currentEditingProvider())) variables found in the pasted text.")
         }
     }
 
@@ -72,7 +90,7 @@ extension AppDelegate {
         }
 
         do {
-            let parsed = try service.parse(text)
+            let parsed = try service.parse(provider: currentEditingProvider(), text)
             guard !parsed.fields.isEmpty else {
                 return false
             }
@@ -85,7 +103,13 @@ extension AppDelegate {
             reloadFieldsTable()
             updateVariablesSummary()
             updateProfileMode()
-            setStatus(userInitiated ? "Parsed \(parsed.fields.count) variable(s)" : "Auto-parsed \(parsed.fields.count) variable(s)")
+            // Parser notes are security-relevant (e.g. "private key not
+            // imported") — they win over the generic success message.
+            if let notes = parsed.notes, !notes.isEmpty {
+                setStatus(notes.joined(separator: " "))
+            } else {
+                setStatus(userInitiated ? "Parsed \(parsed.fields.count) variable(s)" : "Auto-parsed \(parsed.fields.count) variable(s)")
+            }
             return true
         } catch {
             if userInitiated {
@@ -96,7 +120,12 @@ extension AppDelegate {
     }
 
     func looksParseable(_ text: String) -> Bool {
-        text.contains("=") || text.contains("[") || text.localizedCaseInsensitiveContains("AWS_")
+        text.contains("=") || text.contains("[") || text.contains("{")
+            || text.localizedCaseInsensitiveContains("AWS_")
+            || text.localizedCaseInsensitiveContains("AZURE_")
+            || text.localizedCaseInsensitiveContains("ARM_")
+            || text.localizedCaseInsensitiveContains("CLOUDSDK_")
+            || text.localizedCaseInsensitiveContains("GOOGLE_")
     }
 
     @objc func addVariable() {
@@ -137,6 +166,7 @@ extension AppDelegate {
         commitActiveEdits()
         _ = applyParsedCredentialsFromPaste(force: false, userInitiated: false)
 
+        let provider = currentEditingProvider()
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
             showError("Profile name is required.")
@@ -150,14 +180,15 @@ extension AppDelegate {
         }
 
         do {
-            let wasExisting = profileExists(name)
-            if wasExisting, !confirmOverwrite(name: name, newFields: fields) {
+            let wasExisting = profileExists(name, provider: provider)
+            if wasExisting, !confirmOverwrite(provider: provider, name: name, newFields: fields) {
                 setStatus("Save cancelled")
                 return
             }
-            try service.save(name, fields: fields)
+            try service.save(provider: provider, name, fields: fields)
             let savedCount = fields.values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
-            refreshProfiles(selecting: name)
+            selectedProvider = provider
+            refreshProfiles(selecting: name, provider: provider)
             setStatus(wasExisting ? "Updated \(name) · \(savedCount) field(s)" : "Created \(name) · \(savedCount) field(s)")
         } catch {
             showError(error.localizedDescription)
@@ -177,23 +208,28 @@ extension AppDelegate {
             setStatus("Nothing to copy")
             return
         }
+        copyConcealed(field.value)
+        setStatus("Copied \(displayKey(field.key))")
+    }
+
+    /// Copies text flagged as concealed so clipboard-history managers (Paste,
+    /// Maccy, Alfred, …) skip logging it. Every copy that can contain secret
+    /// material must go through here.
+    func copyConcealed(_ text: String) {
         let pasteboard = NSPasteboard.general
-        // Flag the payload as concealed so clipboard-history managers (Paste,
-        // Maccy, Alfred, …) skip logging a copied secret.
         let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
         pasteboard.clearContents()
         pasteboard.declareTypes([.string, concealed], owner: nil)
-        pasteboard.setString(field.value, forType: .string)
-        pasteboard.setString(field.value, forType: concealed)
-        setStatus("Copied \(displayKey(field.key))")
+        pasteboard.setString(text, forType: .string)
+        pasteboard.setString(text, forType: concealed)
     }
 
     /// Shows a readable, grouped diff of what will change on an existing profile
     /// and asks for confirmation. Returns true to proceed (or if nothing changed).
-    func confirmOverwrite(name: String, newFields: [String: String]) -> Bool {
+    func confirmOverwrite(provider: String, name: String, newFields: [String: String]) -> Bool {
         let current: [String: String]
         do {
-            current = try service.get(name).fields
+            current = try service.get(provider: provider, name).fields
         } catch {
             return true // can't read current state; fall back to a plain save
         }
@@ -202,19 +238,20 @@ extension AppDelegate {
         let total = diff.added.count + diff.changed.count + diff.removed.count
         if total == 0 { return true }
 
+        let path = pathsByProvider[provider] ?? "disk"
         let alert = NSAlert()
         alert.messageText = "Save changes to “\(name)”?"
-        alert.informativeText = "\(total) change\(total == 1 ? "" : "s") to ~/.aws/credentials — a timestamped backup is written first."
+        alert.informativeText = "\(total) change\(total == 1 ? "" : "s") to \(path) — a timestamped backup is written first."
         alert.accessoryView = diffAccessoryView(diff)
         alert.addButton(withTitle: "Save Changes")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    private typealias Diff = (added: [(String, String)], changed: [(String, String, String)], removed: [String])
+    typealias FieldDiff = (added: [(String, String)], changed: [(String, String, String)], removed: [String])
 
     /// Groups the field diff (secrets masked; empty new value = removed).
-    private func diffGroups(old: [String: String], new: [String: String]) -> Diff {
+    func diffGroups(old: [String: String], new: [String: String]) -> FieldDiff {
         var keys = Set(old.keys)
         new.keys.forEach { keys.insert($0) }
 
@@ -240,8 +277,9 @@ extension AppDelegate {
         return (added, changed, removed)
     }
 
-    /// A scrollable, monospaced, color-coded diff view for the save alert.
-    private func diffAccessoryView(_ diff: Diff) -> NSView {
+    /// A scrollable, monospaced, color-coded diff view — reused by the save
+    /// confirmation, profile compare and Launch Template apply flows.
+    func diffAccessoryView(_ diff: FieldDiff) -> NSView {
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let sectionFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
         let out = NSMutableAttributedString()

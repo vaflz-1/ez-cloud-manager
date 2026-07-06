@@ -20,15 +20,35 @@ credentials.bak.*
 *.mobileprovision
 *.cer
 
-# ── Claude Code / ruflo tooling (local dev only — not part of the app) ──
+# ── Claude Code / ruflo / AI tooling (local dev only — never part of the app) ──
 .claude/
 .claude-flow/
 .claude-flow.db
 CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
 .mcp.json
 .swarm/
+.hive-mind/
+.agentdb/
+.agentdb*
+agentdb.rvf*
+.ruv-swarm/
+.ruflo/
 ruvector.db
 memory/
+claude-flow*
+.roo/
+.cursor/
+.aider*
+
+# ── Local databases / caches (AI tooling state, never app data) ──
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # ── Node / npx ──
 node_modules/

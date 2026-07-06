@@ -3,11 +3,13 @@ import Foundation
 
 /// AppDelegate owns the window and app state. Its behavior is split across
 /// focused extensions to keep each concern readable:
-///   - AppDelegate+Menu    — main menu construction
-///   - AppDelegate+Layout  — window / sidebar / detail view building
-///   - AppDelegate+Tables  — NSTableView data source & delegate
-///   - AppDelegate+Actions — user-triggered actions (add/save/delete/parse)
-///   - AppDelegate+State   — profile loading, field rows, status helpers
+///   - AppDelegate+Menu       — main menu construction
+///   - AppDelegate+Layout     — window / sidebar / detail view building
+///   - AppDelegate+Tables     — NSTableView data source & delegate
+///   - AppDelegate+Actions    — user-triggered actions (add/save/delete/parse)
+///   - AppDelegate+State      — profile loading, field rows, status helpers
+///   - AppDelegate+Transfer   — export / import / compare / activate
+///   - AppDelegate+Workspaces — workspace switching & membership
 ///
 /// Members are `internal` (not `private`) because they are shared across those
 /// extension files; the app is a single-module binary, so nothing leaks.
@@ -18,66 +20,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
     var fieldsTable: NSTableView!
     var profileNameField: NSTextField!
     var profileModeLabel: NSTextField!
+    var providerPopup: NSPopUpButton!
+    var workspacePopup: NSPopUpButton!
     var pasteView: NSTextView!
+    var pasteLabel: NSTextField!
     var statusLabel: NSTextField!
     var variablesTitleLabel: NSTextField!
     var variablesSummaryLabel: NSTextField!
-    var variablesEditorView: NSView!
     var saveButton: NSButton!
+    var activateButton: NSButton!
+    var exportButton: NSPopUpButton!
     var profileSearchField: NSSearchField!
 
     /// Boundary to the `ezcloud` CLI. All persistence goes through this.
     let service = CredentialsService()
 
-    var credentialsPath = ""
-    /// Full profile list from disk; `profiles` is the (search-)filtered view.
-    var allProfiles: [ProfileSummary] = []
-    var profiles: [ProfileSummary] = []
-    var fieldRows: [FieldRow] = []
+    // MARK: Multi-provider state
+
+    /// Registered backends, in canonical display order (aws, gcp, azure, …).
+    var providers: [ProviderInfo] = []
+    /// Field catalogs per provider id — drive labels, masking, placeholders.
+    var schemas: [String: ProviderSchema] = [:]
+    /// Full profile lists per provider; the sidebar renders a filtered view.
+    var profilesByProvider: [String: [ProfileSummary]] = [:]
+    /// Storage path per provider (shown in status / delete confirmations).
+    var pathsByProvider: [String: String] = [:]
+    /// The rendered sidebar (headers + profiles after search/workspace filter).
+    var sidebarRows: [SidebarRow] = []
+
+    var workspaces: [Workspace] = []
+    /// nil = "All Profiles" (no workspace filter).
+    var activeWorkspaceName: String?
+    /// True while rebuildSidebarRows() reloads the table — reloadData fires
+    /// spurious selection-change notifications that must not clear the detail.
+    var isRebuildingSidebar = false
+    /// Profile whose selection was hidden by the current filter; restored
+    /// automatically the moment the filter lets it back in.
+    var hiddenSelection: (provider: String, name: String)?
+    /// 3px accent stripe on the PROFILE card, tinted by the editing provider.
+    var profileCardStripe: NSView!
+
+    /// Provider owning the currently selected/edited profile.
+    var selectedProvider = "aws"
     var selectedProfileName: String?
+    var fieldRows: [FieldRow] = []
     var lastAutoParsedPaste = ""
-    let minimumVariablesEditorHeight: CGFloat = 240
-    let minimumVariablesTableHeight: CGFloat = 180
+
+    /// Retains the Launch Templates window while it is open.
+    var launchTemplatesController: LaunchTemplatesWindowController?
 
     /// Presentation layer over `fieldRows`: section headers + field references,
     /// so the flat model drives grouped, collapsible rows (Common/Advanced/…).
     var displayItems: [VarItem] = []
     var collapsedSections: Set<VarSection> = []
 
-    /// Keys whose values are hidden in the UI unless revealed via the eye toggle.
-    let secretKeys: Set<String> = ["aws_secret_access_key", "aws_session_token"]
-
-    /// Fields shown in the always-visible "Common" section (the rest are Advanced).
-    let commonKeys: Set<String> = [
-        "aws_access_key_id", "aws_secret_access_key", "aws_session_token", "region", "output"
-    ]
-
-    let recommendedKeys = [
-        "aws_access_key_id",
-        "aws_secret_access_key",
-        "aws_session_token",
-        "region",
-        "output",
-        "role_arn",
-        "source_profile",
-        "mfa_serial",
-        "duration_seconds",
-        "credential_process",
-        "credential_source",
-        "role_session_name",
-        "external_id",
-        "web_identity_token_file",
-        "endpoint_url",
-        "cli_pager",
-        "retry_mode",
-        "max_attempts",
-        "sts_regional_endpoints",
-        "sso_session",
-        "sso_start_url",
-        "sso_region",
-        "sso_account_id",
-        "sso_role_name"
-    ]
+    static let koFiURL = URL(string: "https://ko-fi.com/vaflz")!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -86,6 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         configureToolbar()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        loadProviders()
+        reloadWorkspaces()
         refreshProfiles()
     }
 
@@ -105,4 +104,13 @@ enum VarSection: String, CaseIterable {
 enum VarItem {
     case header(VarSection)
     case field(Int)
+}
+
+/// One row in the profiles sidebar: a provider group header, a profile, a
+/// "TOOLS" subheader, or one of the provider's tools/services.
+enum SidebarRow {
+    case header(provider: String, title: String, count: Int)
+    case profile(provider: String, name: String)
+    case subheader(String)
+    case tool(provider: String, id: String, title: String, symbol: String)
 }

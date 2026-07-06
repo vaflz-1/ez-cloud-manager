@@ -1,46 +1,210 @@
 import AppKit
 
 extension AppDelegate {
-    func refreshProfiles(selecting wantedName: String? = nil) {
-        do {
-            let response = try service.list()
-            credentialsPath = response.path
-            allProfiles = response.profiles.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            applyProfileFilter()
+    /// Canonical provider ordering for the sidebar: the big three first,
+    /// anything registered later sorts after them.
+    static let providerOrder = ["aws", "gcp", "azure"]
 
-            let nameToSelect = wantedName ?? selectedProfileName
-            if let name = nameToSelect, let idx = profiles.firstIndex(where: { $0.name == name }) {
-                profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                loadProfile(name)
-            } else {
-                if selectedProfileName == nil && profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    clearDetailForNoSelection()
-                }
-                updateProfileMode()
-                setStatus("Loaded \(allProfiles.count) profile(s) from \(credentialsPath)")
+    /// Loads provider list + field schemas once at startup. Failure leaves the
+    /// app usable with the AWS legacy assumptions (secret-name heuristics).
+    func loadProviders() {
+        do {
+            var infos = try service.providers()
+            infos.sort { lhs, rhs in
+                let li = Self.providerOrder.firstIndex(of: lhs.id) ?? Int.max
+                let ri = Self.providerOrder.firstIndex(of: rhs.id) ?? Int.max
+                return li == ri ? lhs.id < rhs.id : li < ri
             }
+            providers = infos
+            for info in infos {
+                schemas[info.id] = try? service.schema(provider: info.id)
+            }
+            rebuildProviderPopup()
         } catch {
             showError(error.localizedDescription)
         }
     }
 
-    /// Filters `allProfiles` by the search field into the visible `profiles`.
-    func applyProfileFilter() {
-        let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.isEmpty {
-            profiles = allProfiles
-        } else {
-            profiles = allProfiles.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    func providerInfo(_ id: String) -> ProviderInfo? {
+        providers.first { $0.id == id }
+    }
+
+    func providerDisplayName(_ id: String) -> String {
+        providerInfo(id)?.displayName ?? id.uppercased()
+    }
+
+    /// Provider that owns the profile being edited: the selected profile's
+    /// provider, or the provider chosen in the popup for a new profile.
+    func currentEditingProvider() -> String {
+        if selectedProfileName != nil { return selectedProvider }
+        if let id = providerPopup?.selectedItem?.representedObject as? String { return id }
+        return selectedProvider
+    }
+
+    // MARK: - Profile loading / sidebar model
+
+    func refreshProfiles(selecting wantedName: String? = nil, provider wantedProvider: String? = nil) {
+        var loadedCount = 0
+        for info in providers.isEmpty ? [ProviderInfo(id: "aws", displayName: "AWS", canActivate: false, activateLabel: nil)] : providers {
+            do {
+                let response = try service.list(provider: info.id)
+                profilesByProvider[info.id] = response.profiles.sorted {
+                    $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                }
+                pathsByProvider[info.id] = response.path
+                loadedCount += response.profiles.count
+            } catch {
+                // One broken backend (e.g. unreadable gcloud dir) must not
+                // take down the others; surface it in status, keep going.
+                setStatus("\(info.displayName): \(error.localizedDescription)")
+                profilesByProvider[info.id] = []
+            }
         }
+        rebuildSidebarRows()
+
+        let provider = wantedProvider ?? selectedProvider
+        let name = wantedName ?? selectedProfileName
+        if let name, let idx = sidebarIndex(ofProfile: name, provider: provider) {
+            profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            loadProfile(provider: provider, name: name)
+        } else {
+            if selectedProfileName == nil && profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                clearDetailForNoSelection()
+            }
+            updateProfileMode()
+            setStatus("Loaded \(loadedCount) profile(s) across \(profilesByProvider.count) provider(s)")
+        }
+    }
+
+    /// Rebuilds the sidebar rows from provider groups, applying the search
+    /// text and the active workspace filter.
+    func rebuildSidebarRows() {
+        let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspace = activeWorkspace()
+        var rows: [SidebarRow] = []
+        for info in providers {
+            let all = profilesByProvider[info.id] ?? []
+            let visible = all.filter { summary in
+                if let workspace, !workspace.members.contains(WorkspaceMember(provider: info.id, profile: summary.name)) {
+                    return false
+                }
+                return query.isEmpty || summary.name.localizedCaseInsensitiveContains(query)
+            }
+            let tools = providerTools(info.id, matching: query)
+            // Hide empty provider groups while filtering/workspace-scoped so
+            // the list stays dense; show them when browsing everything (an
+            // empty "Azure" header is the discoverable way to add one).
+            if visible.isEmpty && tools.isEmpty && (workspace != nil || !query.isEmpty) { continue }
+            rows.append(.header(provider: info.id, title: info.displayName, count: visible.count))
+            rows.append(contentsOf: visible.map { .profile(provider: info.id, name: $0.name) })
+            // A "TOOLS" subheader separates services from profiles so tools
+            // don't read as just more profiles (skipped when there is nothing
+            // above them to confuse with).
+            if !tools.isEmpty && !visible.isEmpty {
+                rows.append(.subheader("Tools"))
+            }
+            rows.append(contentsOf: tools)
+        }
+        sidebarRows = rows
+
+        isRebuildingSidebar = true
         profilesTable.reloadData()
-        if let name = selectedProfileName, let idx = profiles.firstIndex(where: { $0.name == name }) {
+        if let name = selectedProfileName, let idx = sidebarIndex(ofProfile: name, provider: selectedProvider) {
+            profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+        }
+        isRebuildingSidebar = false
+
+        // The filter can hide the profile whose fields are on screen; leaving
+        // them visible looks like phantom state — clear the detail, remember
+        // what was selected, and bring it back the moment the filter relents.
+        if let name = selectedProfileName, sidebarIndex(ofProfile: name, provider: selectedProvider) == nil {
+            hiddenSelection = (selectedProvider, name)
+            clearDetailForNoSelection()
+            setStatus(query.isEmpty
+                ? "“\(name)” isn’t in this workspace — switch workspace to edit it"
+                : "“\(name)” is hidden by the filter — clear the search to restore it")
+        } else if selectedProfileName == nil, let hidden = hiddenSelection,
+                  let idx = sidebarIndex(ofProfile: hidden.name, provider: hidden.provider) {
+            hiddenSelection = nil
             profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
         }
     }
 
-    /// Whether a field's value should be hidden in the UI.
+    /// Tool/service rows a provider contributes to the sidebar (the "internal
+    /// apps" of each cloud). Search filters them like profiles.
+    func providerTools(_ providerID: String, matching query: String) -> [SidebarRow] {
+        var tools: [SidebarRow] = []
+        if providerID == "aws" {
+            tools.append(.tool(provider: "aws", id: "launch-templates",
+                               title: "EC2 Launch Templates", symbol: "server.rack"))
+        }
+        guard !query.isEmpty else { return tools }
+        return tools.filter {
+            if case .tool(_, _, let title, _) = $0 { return title.localizedCaseInsensitiveContains(query) }
+            return false
+        }
+    }
+
+    func sidebarIndex(ofProfile name: String, provider: String) -> Int? {
+        sidebarRows.firstIndex {
+            if case .profile(let p, let n) = $0 { return p == provider && n == name }
+            return false
+        }
+    }
+
+    func profileExists(_ name: String, provider: String) -> Bool {
+        (profilesByProvider[provider] ?? []).contains { $0.name == name }
+    }
+
+    func loadProfile(provider: String, name: String) {
+        do {
+            let profile = try service.get(provider: provider, name)
+            hiddenSelection = nil // an explicit selection supersedes the remembered one
+            selectedProvider = provider
+            selectedProfileName = profile.name
+            profileNameField.stringValue = profile.name
+            pasteView.string = ""
+            lastAutoParsedPaste = ""
+            fieldRows = rows(from: profile.fields, includeEmptyRecommended: true)
+            resetFieldCollapse()
+            reloadFieldsTable()
+            syncProviderPopup()
+            updatePasteLabel()
+            updateVariablesSummary()
+            updateProfileMode()
+            setStatus("Loaded \(profile.name) (\(providerDisplayName(provider)))")
+        } catch {
+            showError(error.localizedDescription)
+        }
+    }
+
+    func clearDetailForNoSelection() {
+        selectedProfileName = nil
+        profileNameField.stringValue = ""
+        pasteView.string = ""
+        lastAutoParsedPaste = ""
+        fieldRows = []
+        collapsedSections = []
+        reloadFieldsTable()
+        syncProviderPopup()
+        updatePasteLabel()
+        updateVariablesSummary()
+        updateProfileMode()
+    }
+
+    // MARK: - Schema-driven field knowledge
+
+    func spec(for key: String) -> FieldSpec? {
+        schemas[currentEditingProvider()]?.spec(for: key)
+    }
+
+    /// Whether a field's value should be hidden in the UI. Schema-marked
+    /// secrets are authoritative; for custom keys outside the schema a
+    /// conservative name heuristic keeps obviously sensitive values masked.
     func isSecretKey(_ key: String) -> Bool {
-        secretKeys.contains(key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        if let spec = spec(for: key) { return spec.isSecret }
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return k.contains("secret") || k.contains("token") || k.contains("password") || k.contains("private_key")
     }
 
     /// Masked representation of a secret value (empty stays empty).
@@ -48,14 +212,26 @@ extension AppDelegate {
         value.isEmpty ? "" : "••••••••"
     }
 
-    // MARK: - Variables grouping (displayItems presentation over fieldRows)
+    /// Schema keys for the editing provider, in schema (UI) order.
+    func recommendedKeys() -> [String] {
+        schemas[currentEditingProvider()]?.fields.map { $0.key } ?? []
+    }
 
     func section(for key: String) -> VarSection {
-        let k = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if commonKeys.contains(k) { return .common }
-        if recommendedKeys.contains(k) { return .advanced }
-        return .additional
+        guard let spec = spec(for: key) else { return .additional }
+        return spec.isCommon ? .common : .advanced
     }
+
+    func displayKey(_ key: String) -> String {
+        spec(for: key)?.display ?? key
+    }
+
+    /// Muted example shown as placeholder for empty values (empty ≠ broken).
+    func placeholderExample(for key: String) -> String {
+        spec(for: key)?.placeholder ?? "Optional"
+    }
+
+    // MARK: - Variables grouping (displayItems presentation over fieldRows)
 
     /// Rebuilds `displayItems` from `fieldRows` honoring collapse state. Empty
     /// sections are omitted; a collapsed section shows only its header.
@@ -94,78 +270,17 @@ extension AppDelegate {
         }
     }
 
-    /// Muted example shown as placeholder for empty values (empty ≠ broken).
-    func placeholderExample(for key: String) -> String {
-        switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "aws_access_key_id":       return "AKIA…"
-        case "aws_secret_access_key":   return "Not set — click the eye to add"
-        case "aws_session_token":       return "Not set — click the eye to add"
-        case "region":                  return "us-east-1"
-        case "output":                  return "json"
-        case "role_arn":                return "arn:aws:iam::123456789012:role/Name"
-        case "source_profile":          return "default"
-        case "mfa_serial":              return "arn:aws:iam::123456789012:mfa/user"
-        case "duration_seconds":        return "3600"
-        case "role_session_name":       return "my-session"
-        case "external_id":             return "unique-id"
-        case "web_identity_token_file": return "/path/to/token"
-        case "endpoint_url":            return "https://…"
-        case "cli_pager":               return "(empty to disable)"
-        case "retry_mode":              return "standard"
-        case "max_attempts":            return "3"
-        case "sts_regional_endpoints":  return "regional"
-        case "sso_session":             return "my-sso"
-        case "sso_start_url":           return "https://my.awsapps.com/start"
-        case "sso_region":              return "us-east-1"
-        case "sso_account_id":          return "123456789012"
-        case "sso_role_name":           return "PowerUserAccess"
-        case "credential_process":      return "/path/to/helper"
-        case "credential_source":       return "Ec2InstanceMetadata"
-        case "ca_bundle":               return "/path/to/ca.pem"
-        default:                        return "Optional"
-        }
-    }
-
-    func loadProfile(_ name: String) {
-        do {
-            let profile = try service.get(name)
-            selectedProfileName = profile.name
-            profileNameField.stringValue = profile.name
-            pasteView.string = ""
-            lastAutoParsedPaste = ""
-            fieldRows = rows(from: profile.fields, includeEmptyRecommended: true)
-            resetFieldCollapse()
-            reloadFieldsTable()
-            updateVariablesSummary()
-            updateProfileMode()
-            setStatus("Loaded \(profile.name)")
-        } catch {
-            showError(error.localizedDescription)
-        }
-    }
-
-    func clearDetailForNoSelection() {
-        selectedProfileName = nil
-        profileNameField.stringValue = ""
-        pasteView.string = ""
-        lastAutoParsedPaste = ""
-        fieldRows = []
-        collapsedSections = []
-        reloadFieldsTable()
-        updateVariablesSummary()
-        updateProfileMode()
-    }
-
     func rows(from fields: [String: String], includeEmptyRecommended: Bool = false) -> [FieldRow] {
         var rows: [FieldRow] = []
-        for key in recommendedKeys {
+        let recommended = recommendedKeys()
+        for key in recommended {
             if let value = fields[key] {
                 rows.append(FieldRow(key: key, value: value))
             } else if includeEmptyRecommended {
                 rows.append(FieldRow(key: key, value: ""))
             }
         }
-        let extras = fields.keys.filter { !recommendedKeys.contains($0) }.sorted()
+        let extras = fields.keys.filter { !recommended.contains($0) }.sorted()
         for key in extras {
             rows.append(FieldRow(key: key, value: fields[key] ?? ""))
         }
@@ -176,7 +291,7 @@ extension AppDelegate {
     }
 
     func standardEmptyRows() -> [FieldRow] {
-        recommendedKeys.map { FieldRow(key: $0, value: "") }
+        recommendedKeys().map { FieldRow(key: $0, value: "") }
     }
 
     func fieldsDictionary() -> [String: String] {
@@ -189,6 +304,51 @@ extension AppDelegate {
             }
         }
         return fields
+    }
+
+    // MARK: - Detail chrome (labels, popups, buttons)
+
+    func rebuildProviderPopup() {
+        guard let popup = providerPopup else { return }
+        popup.removeAllItems()
+        for info in providers {
+            popup.addItem(withTitle: info.displayName)
+            popup.lastItem?.representedObject = info.id
+            popup.lastItem?.image = ProviderStyle.badge(info.id, height: 13)
+        }
+        syncProviderPopup()
+    }
+
+    /// Popup reflects the editing provider; it is only enabled while creating
+    /// a new profile (a stored profile cannot move between clouds).
+    func syncProviderPopup() {
+        guard let popup = providerPopup else { return }
+        if let idx = providers.firstIndex(where: { $0.id == selectedProvider }) {
+            popup.selectItem(at: idx)
+        }
+        popup.isEnabled = (selectedProfileName == nil)
+        // The accent stripe ties the detail card back to the sidebar's
+        // provider colors.
+        profileCardStripe?.layer?.backgroundColor =
+            ProviderStyle.color(currentEditingProvider()).withAlphaComponent(0.9).cgColor
+        updateActivateButton()
+        updateExportButton()
+    }
+
+    func updatePasteLabel() {
+        pasteLabel?.stringValue = "PASTE \(providerDisplayName(currentEditingProvider()).uppercased()) CREDENTIALS OR CONFIG"
+    }
+
+    func updateActivateButton() {
+        guard let button = activateButton else { return }
+        let info = providerInfo(selectedProvider)
+        let visible = (info?.canActivate ?? false) && selectedProfileName != nil
+        button.isHidden = !visible
+        button.toolTip = info?.activateLabel
+    }
+
+    func updateExportButton() {
+        exportButton?.isEnabled = selectedProfileName != nil
     }
 
     func updateVariablesSummary() {
@@ -205,76 +365,13 @@ extension AppDelegate {
         }
     }
 
-    func displayKey(_ key: String) -> String {
-        switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "aws_access_key_id":
-            return "AWS_ACCESS_KEY_ID"
-        case "aws_secret_access_key":
-            return "AWS_SECRET_ACCESS_KEY"
-        case "aws_session_token":
-            return "AWS_SESSION_TOKEN"
-        case "region":
-            return "AWS_DEFAULT_REGION"
-        case "output":
-            return "AWS_DEFAULT_OUTPUT"
-        case "ca_bundle":
-            return "AWS_CA_BUNDLE"
-        case "role_arn":
-            return "AWS_ROLE_ARN / role_arn"
-        case "source_profile":
-            return "source_profile"
-        case "mfa_serial":
-            return "mfa_serial"
-        case "duration_seconds":
-            return "duration_seconds"
-        case "credential_process":
-            return "credential_process"
-        case "credential_source":
-            return "credential_source"
-        case "role_session_name":
-            return "AWS_ROLE_SESSION_NAME"
-        case "external_id":
-            return "external_id"
-        case "web_identity_token_file":
-            return "AWS_WEB_IDENTITY_TOKEN_FILE"
-        case "endpoint_url":
-            return "AWS_ENDPOINT_URL"
-        case "cli_pager":
-            return "AWS_CLI_PAGER"
-        case "retry_mode":
-            return "AWS_RETRY_MODE"
-        case "max_attempts":
-            return "AWS_MAX_ATTEMPTS"
-        case "sts_regional_endpoints":
-            return "AWS_STS_REGIONAL_ENDPOINTS"
-        case "sso_session":
-            return "sso_session"
-        case "sso_start_url":
-            return "sso_start_url"
-        case "sso_region":
-            return "sso_region"
-        case "sso_account_id":
-            return "sso_account_id"
-        case "sso_role_name":
-            return "sso_role_name"
-        case "":
-            return ""
-        default:
-            return key
-        }
-    }
-
-    func profileExists(_ name: String) -> Bool {
-        profiles.contains { $0.name == name }
-    }
-
     func updateProfileMode() {
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty && selectedProfileName == nil && fieldRows.isEmpty {
             profileModeLabel.stringValue = "No profile selected"
             saveButton.title = "Create profile"
             saveButton.isEnabled = false
-        } else if !name.isEmpty && profileExists(name) {
+        } else if !name.isEmpty && profileExists(name, provider: currentEditingProvider()) {
             profileModeLabel.stringValue = "Updating existing profile"
             saveButton.title = "Update profile"
             saveButton.isEnabled = !fieldRows.isEmpty
@@ -283,6 +380,8 @@ extension AppDelegate {
             saveButton.title = "Create profile"
             saveButton.isEnabled = !name.isEmpty && !fieldRows.isEmpty
         }
+        updateActivateButton()
+        updateExportButton()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -291,7 +390,7 @@ extension AppDelegate {
             updateProfileMode()
             updateVariablesSummary()
         } else if control === profileSearchField {
-            applyProfileFilter()
+            rebuildSidebarRows()
         }
     }
 
