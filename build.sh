@@ -21,7 +21,8 @@ DIST_DIR="$PROJECT_DIR/dist"
 CLI_LINK="$USER_HOME/.local/bin/ezcloud"
 OLD_CLI_LINK="$USER_HOME/.local/bin/cloudez"
 LEGACY_CLI_LINK="$USER_HOME/.local/bin/awspm"
-ICON_FILE="$PROJECT_DIR/assets/EZCloudManagerNexusCore.icns"
+ICON_BASENAME="EZCloudManagerAppIcon"
+ICON_FILE="$PROJECT_DIR/assets/$ICON_BASENAME.icns"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 pkill -x EZCloudManager 2>/dev/null || true
@@ -30,6 +31,10 @@ pkill -x AWSProfileManager 2>/dev/null || true
 
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$DIST_DIR" "$(dirname "$CLI_LINK")" "$USER_HOME/Applications"
+
+# Generate every icon representation from the committed master so a stale
+# .icns can never slip into a local build.
+swift "$PROJECT_DIR/tools/generate-icon.swift"
 
 go build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
 
@@ -40,7 +45,7 @@ swiftc "$PROJECT_DIR"/ui/*.swift \
   -framework AppKit
 
 cp "$PROJECT_DIR/Info.plist" "$BUILD_APP/Contents/Info.plist"
-cp "$ICON_FILE" "$BUILD_APP/Contents/Resources/EZCloudManagerNexusCore.icns"
+cp "$ICON_FILE" "$BUILD_APP/Contents/Resources/$ICON_BASENAME.icns"
 cp "$DIST_DIR/ezcloud" "$BUILD_APP/Contents/Resources/ezcloud"
 chmod +x "$BUILD_APP/Contents/MacOS/EZCloudManager" "$BUILD_APP/Contents/Resources/ezcloud"
 

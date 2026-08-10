@@ -22,10 +22,11 @@ let projectURL = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()
 let assetsURL = projectURL.appendingPathComponent("assets", isDirectory: true)
-let masterURL = assetsURL.appendingPathComponent("EZCloudManagerNexusCore.master.png")
-let iconsetURL = assetsURL.appendingPathComponent("EZCloudManagerNexusCore.iconset", isDirectory: true)
-let icnsURL = assetsURL.appendingPathComponent("EZCloudManagerNexusCore.icns")
-let previewURL = assetsURL.appendingPathComponent("EZCloudManagerNexusCore.preview.png")
+let iconBaseName = "EZCloudManagerAppIcon"
+let masterURL = assetsURL.appendingPathComponent("\(iconBaseName).master.png")
+let iconsetURL = assetsURL.appendingPathComponent("\(iconBaseName).iconset", isDirectory: true)
+let icnsURL = assetsURL.appendingPathComponent("\(iconBaseName).icns")
+let previewURL = assetsURL.appendingPathComponent("\(iconBaseName).preview.png")
 
 let masterData = try Data(contentsOf: masterURL)
 guard let masterRep = NSBitmapImageRep(data: masterData),
@@ -83,8 +84,8 @@ func drawIcon(pixelSize: Int) -> NSBitmapImageRep {
         yRadius: 214 * scale
     )
 
-    // Slight optical enlargement keeps the three ports recognizable in Finder
-    // list views without maintaining a second hand-edited small-size artwork.
+    // Slight optical enlargement preserves the mark's cut and outer silhouette
+    // in Finder list views without a second hand-edited small-size artwork.
     let crop: CGFloat
     switch pixelSize {
     case ...32:
