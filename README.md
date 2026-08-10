@@ -1,14 +1,18 @@
-# EZ Cloud Manager
+# Kervik
 
-macOS-first multi-cloud credential and config manager for people who juggle
-clouds, accounts and clients all day. AWS profiles, Google Cloud
-configurations and Azure service-principal profiles live in one fast native
-window: inspect, edit, paste-to-parse, import, export, compare, switch.
+Kervik is a fast, native, local-first control plane for cloud work. A small
+platform host provides isolated Workspaces, trusted Connections and an Add-on
+surface; cloud workflows stay outside the core and can grow without turning
+the application into a dashboard monolith.
 
-EZ Cloud Manager is local-first, native, and boringly reliable: no hosted
+Kervik is deliberately boring at the trust boundary: no hosted
 sync, no SaaS login, no telemetry, no surprise network calls. Network is used
-only when you explicitly work with EC2 Launch Templates (through your own AWS
-CLI and credentials).
+only for explicit connector actions such as Test Connection or EC2 Launch
+Templates, through your own vendor CLIs and credentials.
+
+Working-name compatibility: the CLI remains `ezcloud`, exported workspaces
+remain `.ezprofile`, and existing bundle/data identifiers stay unchanged until
+a dedicated migration exists. `kervik` is installed as a CLI alias.
 
 If it saves you time: [support it on Ko-fi ♥](https://ko-fi.com/vaflz).
 
@@ -24,14 +28,17 @@ All provider knowledge (field labels, secret masking, env-var names,
 placeholders) is served by the CLI as a schema — the UI has no hardcoded
 cloud logic, so new providers are pure Go additions.
 
-## Features
+## Platform
 
-- **Workspaces** — group (provider, profile) pairs per client/job/context;
+- **Workspaces** — isolate one client/job/context, its non-secret environment
+  and enabled Add-ons;
   the sidebar popup scopes everything. References only, never credentials.
 - **Paste-to-parse** — paste env lines (bash/PowerShell/Terraform `ARM_*`),
   INI blocks, `gcloud config list` output, service-account JSON or
   `az ad sp create-for-rbac` JSON; fields land in the editor. GCP private
   keys are deliberately never imported — keys stay in files.
+- **Connections** — manage AWS, Google Cloud and Azure contexts through
+  connector-owned local stores; add-ons never need raw credentials.
 - **Import / Export** — import any config file; export as shell `export`
   lines, `.env`, provider-native INI, or JSON. Clipboard exports use the
   concealed pasteboard type (clipboard managers won't log them); file
@@ -52,15 +59,22 @@ cloud logic, so new providers are pure Go additions.
 ## Architecture
 
 - Go CLI core: `cmd/ezcloud` — JSON on stdout, one `--provider` flag
+- Embedded package contracts: `addons/*/addon.json`,
+  `connectors/*/connector.json`, `packageassets.go`
+- Manifest-driven Add-on registry: `internal/plugin` (implementations remain
+  compiled until the permission broker exists)
 - Provider registry: `internal/provider` (+ `awsprovider`, `gcpprovider`,
   `azureprovider` adapters)
 - Backends: `internal/awscreds`, `internal/gcpcreds`, `internal/azurecreds`,
   shared engine `internal/inifile`
 - EC2 Launch Templates: `internal/awslt` (AWS CLI wrapper) +
   `internal/flatjson` (dotted-path flatten/unflatten)
-- Workspaces / audit: `internal/workspace`, `internal/audit`
+- Workspaces / audit: `internal/profile`, `internal/audit`
 - Export renderers: `internal/export`
-- Native macOS UI: `ui/*.swift` (AppKit, single module)
+- Native macOS platform UI: `ui/*.swift` (AppKit, single module; transition
+  map in `platform/README.md`)
+- Product/interaction contract: `docs/PRODUCT_DNA.md`
+- Target add-on/connector architecture: `docs/PLATFORM.md`
 
 The UI talks to the CLI over JSON; the CLI is fully usable standalone:
 
@@ -76,7 +90,7 @@ ezcloud audit --limit 20
 ## Build / install
 
 ```bash
-./build.sh    # builds Go CLI + Swift app, signs, installs to /Applications
+./build.sh    # builds Go CLI + Swift app, signs, installs Kervik to /Applications
 go test ./...
 ```
 

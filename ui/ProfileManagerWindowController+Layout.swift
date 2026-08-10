@@ -18,7 +18,7 @@ extension ProfileManagerWindowController {
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        win.title = "Manage Profiles"
+        win.title = "Workspaces — \(Product.name)"
         win.minSize = NSSize(width: 700, height: 460)
         win.center()
         self.window = win
@@ -54,8 +54,8 @@ extension ProfileManagerWindowController {
         // buttons an earlier draft of this window had.
         let addRemoveControl = NSSegmentedControl(
             images: [
-                NSImage(systemSymbolName: "plus", accessibilityDescription: "New Profile")!,
-                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete Profile")!
+                NSImage(systemSymbolName: "plus", accessibilityDescription: "New Workspace")!,
+                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete Workspace")!
             ],
             trackingMode: .momentary, target: self, action: #selector(listSegmentChanged(_:)))
         addRemoveControl.segmentStyle = .smallSquare
@@ -116,7 +116,7 @@ extension ProfileManagerWindowController {
         let cEnv = envCard.contentView!
         let envLabel = UI.sectionCaption("ENV VARS")
         cEnv.addSubview(envLabel)
-        let warningLabel = NSTextField(labelWithString: "Don't store secrets here — use a cloud account profile or Keychain.")
+        let warningLabel = NSTextField(labelWithString: "Keep secrets in Connections or Keychain.")
         warningLabel.font = .systemFont(ofSize: 10, weight: .medium)
         warningLabel.textColor = .systemOrange
         warningLabel.lineBreakMode = .byTruncatingTail
@@ -175,10 +175,10 @@ extension ProfileManagerWindowController {
         let pluginsCard = UI.makeCard()
         detail.addSubview(pluginsCard)
         let cPlugins = pluginsCard.contentView!
-        let pluginsLabel = UI.sectionCaption("PLUGINS")
+        let pluginsLabel = UI.sectionCaption("ADD-ONS")
         cPlugins.addSubview(pluginsLabel)
 
-        pluginsEmptyLabel = NSTextField(labelWithString: "No plugins enabled — add them from the Hub.")
+        pluginsEmptyLabel = NSTextField(labelWithString: "No add-ons enabled — browse them from the workspace.")
         pluginsEmptyLabel.font = .systemFont(ofSize: 11)
         pluginsEmptyLabel.textColor = .tertiaryLabelColor
         pluginsEmptyLabel.translatesAutoresizingMaskIntoConstraints = false

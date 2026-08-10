@@ -51,8 +51,8 @@ extension CloudAccountsWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let alert = NSAlert()
-        alert.messageText = "Scope this profile's accounts"
-        alert.informativeText = "“\(profile.name)” — choose which accounts this window's sidebar shows."
+        alert.messageText = "Visible connections"
+        alert.informativeText = "“\(profile.name)” — choose which connections this workspace shows."
         alert.accessoryView = stack
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")

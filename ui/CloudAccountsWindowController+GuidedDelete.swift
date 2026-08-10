@@ -35,7 +35,7 @@ extension CloudAccountsWindowController {
 
         let bodyText = guidedDeleteForcedCreate
             ? "This is your only gcloud configuration. Create another to replace it."
-            : "You can't delete the configuration gcloud is currently using. Pick another to activate first — EZ Cloud Manager will switch to it, then delete “\(name)”."
+            : "You can't delete the configuration gcloud is currently using. Pick another to activate first — Kervik will switch to it, then delete “\(name)”."
         let bodyLabel = NSTextField(wrappingLabelWithString: bodyText)
         bodyLabel.font = .systemFont(ofSize: 11)
         bodyLabel.textColor = .secondaryLabelColor

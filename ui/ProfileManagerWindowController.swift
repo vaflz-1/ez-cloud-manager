@@ -96,6 +96,24 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         reloadAll()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.post(name: .refreshWorkspaceStateRequested, object: nil)
+    }
+
+    /// Called after AppDelegate completes the single explicit on-disk refresh.
+    /// `reloadAll` preserves each unsaved draft with its original CAS baseline.
+    func applyRefreshedSnapshot() {
+        let validIDs = Set((service.cachedProfiles() ?? []).map(\.id))
+        let externallyDeleted = editing.flatMap { validIDs.contains($0.id) ? nil : $0.name }
+        if externallyDeleted != nil {
+            editing = nil // prevent reloadAll.captureCurrentDraft from reviving a deleted row
+        }
+        coreDrafts = coreDrafts.filter { validIDs.contains($0.key) }
+        reloadAll()
+        if let externallyDeleted {
+            setStatus("\(externallyDeleted) was deleted outside Kervik")
+        } else {
+            setStatus("Workspace state refreshed")
+        }
     }
 
     private func reloadAll() {
@@ -131,7 +149,7 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         editing = selected
         nameField.stringValue = selected.name
         envVarsTable.reloadData()
-        enabledPluginDescriptors = (try? service.listPlugins(profileID: profile.id).filter { $0.enabled }) ?? []
+        enabledPluginDescriptors = (try? service.listPlugins(profileID: profile.id).filter { $0.enabled && !$0.isSystem }) ?? []
         reloadPluginsCard()
         updateSaveButton()
         if persistSelection, let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
@@ -190,7 +208,7 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         if let index = profiles.firstIndex(where: { $0.id == changedID }) {
             profiles[index] = fresh
         }
-        enabledPluginDescriptors = (try? service.listPlugins(profileID: changedID).filter { $0.enabled }) ?? []
+        enabledPluginDescriptors = (try? service.listPlugins(profileID: changedID).filter { $0.enabled && !$0.isSystem }) ?? []
         reloadPluginsCard()
         updateSaveButton()
     }
@@ -227,7 +245,7 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         )
 
         do {
-            let fresh = try service.getProfile(id: draft.id)
+            let fresh = try service.refreshProfile(id: draft.id)
             coreDrafts[draft.id] = ProfileCoreDraft(
                 name: draft.name,
                 envVars: draft.envVars,
@@ -247,20 +265,20 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
             savedEnvVars = fresh.envVars
             nameField.stringValue = draft.name
             envVarsTable.reloadData()
-            enabledPluginDescriptors = (try? service.listPlugins(profileID: draft.id).filter { $0.enabled }) ?? []
+            enabledPluginDescriptors = (try? service.listPlugins(profileID: draft.id).filter { $0.enabled && !$0.isSystem }) ?? []
             reloadPluginsCard()
             updateSaveButton()
             setStatus("Draft preserved — review and Save again")
         } catch {
             updateSaveButton()
-            setStatus("Draft preserved — latest profile could not be reloaded")
-            showError("The profile changed elsewhere. Your draft is preserved, but the latest version could not be loaded: \(error.localizedDescription)")
+            setStatus("Draft preserved — latest workspace could not be reloaded")
+            showError("The workspace changed elsewhere. Your draft is preserved, but the latest version could not be loaded: \(error.localizedDescription)")
         }
     }
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Manage Profiles"
+        alert.messageText = "Workspaces"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
@@ -340,15 +358,21 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
     @objc func deleteSelected() {
         guard let editing else { return }
         guard profiles.count > 1 else {
-            showError("The last remaining profile can't be deleted — every window needs one to bind to.")
+            showError("The last remaining workspace can't be deleted — every window needs one.")
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Delete profile “\(editing.name)”?"
-        alert.informativeText = "This removes the profile container and closes its window and addon windows. No cloud account credentials are touched."
-        alert.addButton(withTitle: "Delete Profile")
+        alert.messageText = "Delete workspace “\(editing.name)”?"
+        alert.informativeText = "This removes the workspace and closes its add-on windows. No cloud credentials are touched."
+        alert.addButton(withTitle: "Delete Workspace")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let preflight = ProfileContextChangePreflight(profileID: editing.id)
+        NotificationCenter.default.post(name: .profileDeletionPreflightRequested, object: preflight)
+        guard preflight.allowed else {
+            setStatus("Deletion paused — unsaved connection draft preserved")
+            return
+        }
         do {
             try service.deleteProfile(id: editing.id)
             setStatus("Deleted \(editing.name)")
@@ -398,10 +422,21 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         guard var profile = editing else { return }
         let newName = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !newName.isEmpty else {
-            showError("Profile name is required.")
+            showError("Workspace name is required.")
             return
         }
         profile.name = newName
+        if profile.envVars != savedEnvVars {
+            let preflight = ProfileContextChangePreflight(profileID: profile.id)
+            NotificationCenter.default.post(
+                name: .profileEnvironmentChangePreflightRequested,
+                object: preflight
+            )
+            guard preflight.allowed else {
+                setStatus("Save paused — unsaved connection draft preserved")
+                return
+            }
+        }
         do {
             let saved = try service.saveProfile(
                 profile,
@@ -564,8 +599,8 @@ enum ProfileCreationPrompt {
     /// non-empty text, nil otherwise (cancelled or left blank).
     static func run() -> String? {
         let alert = NSAlert()
-        alert.messageText = "New profile"
-        alert.informativeText = "A profile is a global container: cloud account references, env vars, and (later) plugins/settings. Each app window binds to exactly one."
+        alert.messageText = "New workspace"
+        alert.informativeText = "A workspace keeps one cloud context, its non-secret environment, and its enabled add-ons together."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         field.placeholderString = "e.g. acme-prod"
         alert.accessoryView = field

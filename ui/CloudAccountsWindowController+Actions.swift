@@ -2,6 +2,7 @@ import AppKit
 
 extension CloudAccountsWindowController {
     @objc func refreshTapped() {
+        guard confirmDiscardConnectionChanges() else { return }
         refreshProfiles()
     }
 
@@ -10,12 +11,15 @@ extension CloudAccountsWindowController {
     }
 
     @objc func addProfile() {
+        guard confirmDiscardConnectionChanges() else { return }
+        beginEditorContextChange()
         // Keep the provider of whatever group the user was looking at.
         selectedProfileName = nil
         profileNameField.stringValue = ""
         pasteView.string = ""
         lastAutoParsedPaste = ""
         fieldRows = standardEmptyRows()
+        setEditorBaseline(provider: currentEditingProvider(), name: "", fields: fieldsDictionary())
         resetFieldCollapse()
         reloadFieldsTable()
         syncProviderPopup()
@@ -23,27 +27,38 @@ extension CloudAccountsWindowController {
         updatePasteViewPlaceholder()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(catalog.providerDisplayName(currentEditingProvider())) account")
+        setStatus("New \(catalog.providerDisplayName(currentEditingProvider())) connection")
     }
 
     @objc func providerPopupChanged(_ sender: NSPopUpButton) {
         guard selectedProfileName == nil else { return }
         guard let id = sender.selectedItem?.representedObject as? String else { return }
+        // NSPopUpButton has already changed its selected item before sending
+        // the action. Restore the previous provider while evaluating dirty
+        // state so a pristine new form does not look modified merely because
+        // the popup moved.
+        syncProviderPopup()
+        guard confirmDiscardConnectionChanges() else {
+            return
+        }
+        beginEditorContextChange()
         selectedProvider = id
+        syncProviderPopup()
         fieldRows = standardEmptyRows()
+        setEditorBaseline(provider: id, name: "", fields: fieldsDictionary())
         resetFieldCollapse()
         reloadFieldsTable()
         updatePasteLabel()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(catalog.providerDisplayName(id)) account")
+        setStatus("New \(catalog.providerDisplayName(id)) connection")
     }
 
     @objc func deleteProfile() {
         let provider = currentEditingProvider()
         let name = selectedProfileName ?? profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            showError("Select an account first.")
+            showError("Select a connection first.")
             return
         }
 
@@ -62,7 +77,7 @@ extension CloudAccountsWindowController {
 
         let path = pathsByProvider[provider] ?? "the provider's store"
         let alert = NSAlert()
-        alert.messageText = "Delete \(catalog.providerDisplayName(provider)) account?"
+        alert.messageText = "Delete \(catalog.providerDisplayName(provider)) connection?"
         alert.informativeText = "Account \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
@@ -87,13 +102,45 @@ extension CloudAccountsWindowController {
     }
 
     @objc func parsePastedCredentials() {
-        if !applyParsedCredentialsFromPaste(force: true, userInitiated: true) {
-            showError("No \(catalog.providerDisplayName(currentEditingProvider())) variables found in the pasted text.")
-        }
+        parsePastedCredentialsAsync(force: true, userInitiated: true)
     }
 
     @objc func autoParsePastedCredentials() {
-        _ = applyParsedCredentialsFromPaste(force: false, userInitiated: false)
+        parsePastedCredentialsAsync(force: false, userInitiated: false)
+    }
+
+    private func parsePastedCredentialsAsync(force: Bool, userInitiated: Bool) {
+        let text = pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = currentEditingProvider()
+        guard !text.isEmpty,
+              (force || text != lastAutoParsedPaste),
+              looksParseable(text)
+        else {
+            if userInitiated {
+                showError("No \(catalog.providerDisplayName(provider)) variables found in the pasted text.")
+            }
+            return
+        }
+
+        pasteParseGeneration += 1
+        let generation = pasteParseGeneration
+        let env = profile.envVars.asDictionary()
+        if userInitiated { setStatus("Reading pasted configuration…") }
+        service.runAsync({ try self.service.parse(provider: provider, text, extraEnv: env) }) { [weak self] result in
+            guard let self,
+                  generation == self.pasteParseGeneration,
+                  self.currentEditingProvider() == provider,
+                  self.pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines) == text
+            else { return }
+            switch result {
+            case .success(let parsed):
+                if !self.applyParsedResponse(parsed, sourceText: text, userInitiated: userInitiated), userInitiated {
+                    self.showError("No \(self.catalog.providerDisplayName(provider)) variables found in the pasted text.")
+                }
+            case .failure(let error):
+                if userInitiated { self.showError(error.localizedDescription) }
+            }
+        }
     }
 
     func applyParsedCredentialsFromPaste(force: Bool, userInitiated: Bool) -> Bool {
@@ -110,32 +157,40 @@ extension CloudAccountsWindowController {
 
         do {
             let parsed = try service.parse(provider: currentEditingProvider(), text, extraEnv: profile.envVars.asDictionary())
-            guard !parsed.fields.isEmpty else {
-                return false
-            }
-            lastAutoParsedPaste = text
-            if let name = parsed.profileName, !name.isEmpty, profileNameField.stringValue.isEmpty {
-                profileNameField.stringValue = name
-            }
-            fieldRows = rows(from: parsed.fields, includeEmptyRecommended: true)
-            resetFieldCollapse()
-            reloadFieldsTable()
-            updateVariablesSummary()
-            updateProfileMode()
-            // Parser notes are security-relevant (e.g. "private key not
-            // imported") — they win over the generic success message.
-            if let notes = parsed.notes, !notes.isEmpty {
-                setStatus(notes.joined(separator: " "))
-            } else {
-                setStatus(userInitiated ? "Parsed \(parsed.fields.count) variable(s)" : "Auto-parsed \(parsed.fields.count) variable(s)")
-            }
-            return true
+            return applyParsedResponse(parsed, sourceText: text, userInitiated: userInitiated)
         } catch {
             if userInitiated {
                 showError(error.localizedDescription)
             }
             return false
         }
+    }
+
+    private func applyParsedResponse(
+        _ parsed: ParseResponse,
+        sourceText: String,
+        userInitiated: Bool
+    ) -> Bool {
+        guard !parsed.fields.isEmpty else { return false }
+        lastAutoParsedPaste = sourceText
+        if let name = parsed.profileName, !name.isEmpty, profileNameField.stringValue.isEmpty {
+            profileNameField.stringValue = name
+        }
+        fieldRows = rows(from: parsed.fields, includeEmptyRecommended: true)
+        resetFieldCollapse()
+        reloadFieldsTable()
+        updateVariablesSummary()
+        updateProfileMode()
+        // Parser notes are security-relevant (e.g. "private key not
+        // imported") — they win over the generic success message.
+        if let notes = parsed.notes, !notes.isEmpty {
+            setStatus(notes.joined(separator: " "))
+        } else {
+            setStatus(userInitiated
+                ? "Imported \(parsed.fields.count) value(s)"
+                : "Imported \(parsed.fields.count) value(s) from paste")
+        }
+        return true
     }
 
     func looksParseable(_ text: String) -> Bool {
@@ -159,6 +214,7 @@ extension CloudAccountsWindowController {
             }
         }
         updateVariablesSummary()
+        updateProfileMode()
     }
 
     @objc func removeVariable() {
@@ -169,6 +225,7 @@ extension CloudAccountsWindowController {
         fieldRows.remove(at: idx)
         reloadFieldsTable()
         updateVariablesSummary()
+        updateProfileMode()
     }
 
     @objc func toggleSection(_ sender: NSButton) {
@@ -188,7 +245,7 @@ extension CloudAccountsWindowController {
         let provider = currentEditingProvider()
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            showError("Account name is required.")
+            showError("Connection name is required.")
             return
         }
 
@@ -198,15 +255,47 @@ extension CloudAccountsWindowController {
             return
         }
 
-        do {
-            let wasExisting = profileExists(name, provider: provider)
-            try service.save(provider: provider, name, fields: fields, extraEnv: profile.envVars.asDictionary())
+        let wasExisting = profileExists(name, provider: provider)
+        let env = profile.envVars.asDictionary()
+        connectionSaveGeneration += 1
+        let generation = connectionSaveGeneration
+        let editorGeneration = editorContextGeneration
+        saveButton.isEnabled = false
+        setStatus("Saving \(name)…")
+        service.runAsync({ try self.service.save(provider: provider, name, fields: fields, extraEnv: env) }) { [weak self] result in
+            guard let self,
+                  generation == self.connectionSaveGeneration,
+                  editorGeneration == self.editorContextGeneration
+            else { return }
+            switch result {
+            case .success:
             let savedCount = fields.values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
             selectedProvider = provider
-            refreshProfiles(selecting: name, provider: provider)
+            selectedProfileName = name
+            setEditorBaseline(provider: provider, name: name, fields: fields)
+            var summaries = profilesByProvider[provider] ?? []
+            let keys = fields
+                .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .map(\.key)
+                .sorted()
+            if let index = summaries.firstIndex(where: { $0.name == name }) {
+                summaries[index] = ProfileSummary(name: name, keys: keys, active: summaries[index].active)
+            } else {
+                summaries.append(ProfileSummary(name: name, keys: keys, active: nil))
+            }
+            profilesByProvider[provider] = summaries.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            rebuildSidebarRows()
+            if let index = sidebarIndex(ofProfile: name, provider: provider) {
+                profilesTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            }
+            updateProfileMode()
             setStatus(wasExisting ? "Updated \(name) · \(savedCount) field(s)" : "Created \(name) · \(savedCount) field(s)")
-        } catch {
-            showError(error.localizedDescription)
+            case .failure(let error):
+                updateProfileMode()
+                showError(error.localizedDescription)
+            }
         }
     }
 

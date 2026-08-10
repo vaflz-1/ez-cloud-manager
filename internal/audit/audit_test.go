@@ -1,9 +1,11 @@
 package audit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -61,6 +63,23 @@ func TestAppendWritesRestrictivePerms(t *testing.T) {
 	}
 }
 
+func TestAppendRepairsExistingLogPermissions(t *testing.T) {
+	path := tmpLog(t)
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(path, Event{Action: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("perm = %o, want 600", perm)
+	}
+}
+
 func TestAppendDedupesKeys(t *testing.T) {
 	path := tmpLog(t)
 	if err := Append(path, Event{Action: "save", Keys: []string{"b", "a", "b", "a"}}); err != nil {
@@ -69,6 +88,51 @@ func TestAppendDedupesKeys(t *testing.T) {
 	events, _ := List(path, 0)
 	if got := strings.Join(events[0].Keys, ","); got != "a,b" {
 		t.Fatalf("keys = %q, want a,b", got)
+	}
+}
+
+func TestConcurrentAppendProducesCompleteUniqueEvents(t *testing.T) {
+	path := tmpLog(t)
+	const count = 64
+
+	start := make(chan struct{})
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = Append(path, Event{Action: fmt.Sprintf("append-%02d", i)})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	events, err := List(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != count {
+		t.Fatalf("want %d complete events, got %d", count, len(events))
+	}
+	seen := make(map[string]bool, count)
+	for _, event := range events {
+		if seen[event.Action] {
+			t.Fatalf("duplicate event %q", event.Action)
+		}
+		seen[event.Action] = true
+	}
+	for i := 0; i < count; i++ {
+		action := fmt.Sprintf("append-%02d", i)
+		if !seen[action] {
+			t.Fatalf("missing event %q", action)
+		}
 	}
 }
 

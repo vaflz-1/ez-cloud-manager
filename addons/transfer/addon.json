@@ -1,0 +1,19 @@
+{
+  "$schema": "../addon.schema.json",
+  "schemaVersion": 1,
+  "id": "transfer",
+  "version": "2.0.0",
+  "publisher": "ezcloud",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "kind": "addon",
+  "runtime": { "type": "builtin", "entrypoint": "host:transfer" },
+  "requires": { "connectors": [] },
+  "name": "Transfer",
+  "description": "Export this profile to a .ezprofile file, or import one as a new profile.",
+  "icon": "square.and.arrow.up.on.square",
+  "category": "DevOps",
+  "permissions": {
+    "operations": ["workspace.transfer.read", "workspace.transfer.write"]
+  },
+  "contributes": {}
+}

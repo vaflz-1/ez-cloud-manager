@@ -1,5 +1,4 @@
 import AppKit
-import QuartzCore
 
 /// Per-provider visual identity: accent colors, compact badges and row dots.
 ///
@@ -71,72 +70,6 @@ enum ProviderStyle {
             NSBezierPath(ovalIn: rect).fill()
             return true
         }
-    }
-}
-
-/// The Ko-fi heart: quiet at rest, beats while hovered, pops on click.
-/// A donation button must never nag — motion only happens when the user is
-/// already pointing at it.
-final class PulsingHeartButton: NSButton {
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        wantsLayer = true
-        alphaValue = 0.85 // rest state sits back; hover lifts to full pink
-        recenterAnchor()
-    }
-
-    override func layout() {
-        super.layout()
-        recenterAnchor()
-    }
-
-    /// Scale animations must pivot around the heart's center, not the
-    /// default bottom-left anchor.
-    private func recenterAnchor() {
-        guard let layer else { return }
-        let frame = layer.frame
-        layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        layer.frame = frame
-    }
-
-    override func updateTrackingAreas() {
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self))
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        animator().alphaValue = 1.0
-        guard layer?.animation(forKey: "heartbeat") == nil else { return }
-        let beat = CAKeyframeAnimation(keyPath: "transform.scale")
-        beat.values = [1.0, 1.28, 0.96, 1.18, 1.0]        // lub-dub
-        beat.keyTimes = [0, 0.22, 0.45, 0.68, 1]
-        beat.duration = 0.9
-        beat.repeatCount = .infinity
-        beat.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer?.add(beat, forKey: "heartbeat")
-        toolTip = "Support EZ Cloud Manager on Ko-fi ♥"
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        animator().alphaValue = 0.85
-        layer?.removeAnimation(forKey: "heartbeat")
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        // A single grateful pop, then the normal action fires.
-        let pop = CABasicAnimation(keyPath: "transform.scale")
-        pop.fromValue = 1.0
-        pop.toValue = 1.45
-        pop.duration = 0.12
-        pop.autoreverses = true
-        layer?.add(pop, forKey: "pop")
-        super.mouseDown(with: event)
     }
 }
 

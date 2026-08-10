@@ -4,18 +4,33 @@ extension AppDelegate {
     func configureMainMenu() {
         let mainMenu = NSMenu()
 
-        let appMenuItem = NSMenuItem()
+        let appMenuItem = NSMenuItem(title: Product.name, action: nil, keyEquivalent: "")
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
-        appMenu.addItem(NSMenuItem(title: "About EZ Cloud Manager", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem(title: "About \(Product.name)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
         appMenu.addItem(.separator())
-        appMenu.addItem(NSMenuItem(title: "Hide EZ Cloud Manager", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        appMenu.addItem(NSMenuItem(title: "Hide \(Product.name)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
         appMenu.addItem(NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h"))
         appMenu.items.last?.keyEquivalentModifierMask = [.command, .option]
         appMenu.addItem(NSMenuItem(title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
         appMenu.addItem(.separator())
-        appMenu.addItem(NSMenuItem(title: "Quit EZ Cloud Manager", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        let selectedAppearance = AppAppearance(
+            rawValue: UserDefaults.standard.integer(forKey: "KervikAppearance")
+        ) ?? .system
+        for choice in AppAppearance.allCases {
+            let item = NSMenuItem(title: choice.title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = choice.rawValue
+            item.state = choice == selectedAppearance ? .on : .off
+            appearanceMenu.addItem(item)
+        }
+        appearanceItem.submenu = appearanceMenu
+        appMenu.addItem(appearanceItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit \(Product.name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         // File: just profile-window plumbing now (docs/PLATFORM.md phase P1
         // "menu bar is minimal and basic" — every action that used to live
@@ -28,11 +43,14 @@ extension AppDelegate {
         let fileMenu = NSMenu(title: "File")
         fileMenuItem.submenu = fileMenu
 
-        let newWindowItem = NSMenuItem(title: "New Window with Profile", action: nil, keyEquivalent: "")
+        let newWindowItem = NSMenuItem(title: "New Window with Workspace", action: nil, keyEquivalent: "")
         let newWindowSubmenu = NSMenu()
         newWindowSubmenu.delegate = self
         newWindowItem.submenu = newWindowSubmenu
         fileMenu.addItem(newWindowItem)
+        let refreshItem = NSMenuItem(title: "Refresh Workspace State", action: #selector(refreshWorkspaceState(_:)), keyEquivalent: "r")
+        refreshItem.target = self
+        fileMenu.addItem(refreshItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
 
@@ -69,7 +87,7 @@ extension AppDelegate {
         // post-P1, that trick got fragile. Every Hub keeps its own toolbar
         // Ko-fi button as a small, deliberate duplicate (see AppDelegate's
         // openKoFi doc comment).
-        let koFiItem = NSMenuItem(title: "Support EZ Cloud Manager on Ko-fi ♥", action: #selector(openKoFi), keyEquivalent: "")
+        let koFiItem = NSMenuItem(title: "Support \(Product.name) on Ko-fi", action: #selector(openKoFi), keyEquivalent: "")
         koFiItem.target = self
         helpMenu.addItem(koFiItem)
 
@@ -84,7 +102,7 @@ extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let profiles = try? service.listProfiles(), !profiles.isEmpty else {
-            let hint = NSMenuItem(title: "No profiles yet — use Manage Profiles…", action: nil, keyEquivalent: "")
+            let hint = NSMenuItem(title: "No workspaces yet — use Manage Workspaces…", action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)
             return

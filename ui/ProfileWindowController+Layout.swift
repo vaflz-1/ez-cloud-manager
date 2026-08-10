@@ -1,43 +1,6 @@
 import AppKit
 import QuartzCore
 
-/// Shared spacing/shape system — generous, "inspector"-style breathing room.
-enum UI {
-    static let pad: CGFloat = 24        // content ↔ window edge
-    static let gap: CGFloat = 20        // between cards
-    static let cardPad: CGFloat = 16    // card interior padding
-    static let cardRadius: CGFloat = 10
-    static let labelGap: CGFloat = 8    // caption ↔ control
-    static let rowHeight: CGFloat = 34
-
-    /// A rounded, hairline-bordered "card" (NSBox tracks appearance
-    /// automatically). Add content to `.contentView`; interior padding comes
-    /// from contentViewMargins. Shared across every window that adopts the
-    /// card layout (Cloud Accounts, Manage Profiles) so the boilerplate
-    /// exists once.
-    static func makeCard() -> NSBox {
-        let box = NSBox()
-        box.boxType = .custom
-        box.titlePosition = .noTitle
-        box.fillColor = .controlBackgroundColor
-        box.borderColor = .separatorColor
-        box.borderWidth = 1
-        box.cornerRadius = cardRadius
-        box.contentViewMargins = NSSize(width: cardPad, height: cardPad)
-        box.translatesAutoresizingMaskIntoConstraints = false
-        return box
-    }
-
-    /// Uppercase, secondary section caption (System Settings / inspector style).
-    static func sectionCaption(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
-}
-
 /// Window/toolbar/content construction for the Plugin Hub, split out to keep
 /// the controller file focused on behavior (and under the size budget).
 extension ProfileWindowController {
@@ -48,8 +11,8 @@ extension ProfileWindowController {
             backing: .buffered,
             defer: false
         )
-        win.title = "EZ Cloud Manager — \(profile.name)"
-        win.minSize = NSSize(width: 600, height: 440)
+        win.title = Product.workspaceTitle(profile.name)
+        win.minSize = NSSize(width: 600, height: 460)
         win.titlebarAppearsTransparent = true
         win.titleVisibility = .visible
         win.toolbarStyle = .unified
@@ -58,17 +21,12 @@ extension ProfileWindowController {
         positionWindow(win)
     }
 
-    /// Toolbar: the profile switcher (leading — see +ProfileBar.swift),
-    /// Add Plugins (opens the catalog sheet), Ko-fi — the heart is
-    /// deliberately the quiet accent at the far right, visible on every
-    /// launch, in nobody's way. "Manage Profiles" is no longer its own item —
-    /// it's folded into the profile switcher's menu.
+    /// The toolbar exposes only platform context: Workspace and Connections.
+    /// Add-ons are discovered in content; support remains in Help.
     func configureToolbar() {
         let toolbar = NSToolbar(identifier: "EZCloudHubToolbar")
         toolbar.delegate = self
-        // .iconAndLabel (not .iconOnly) so "Add Plugins" reads as text, not
-        // just a glyph — a small, deliberate ask from the design review.
-        toolbar.displayMode = .iconAndLabel
+        toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window?.toolbar = toolbar
     }
@@ -77,26 +35,14 @@ extension ProfileWindowController {
         switch itemIdentifier.rawValue {
         case "profileSwitcher":
             return buildProfileSwitcherToolbarItem(identifier: itemIdentifier)
-        case "addPlugins":
+        case "connections":
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Add Plugins"
-            item.toolTip = "Browse and enable plugins for this profile"
-            item.image = NSImage(systemSymbolName: "plus.square.on.square", accessibilityDescription: "Add Plugins")
+            item.label = "Connections"
+            item.paletteLabel = "Connections"
+            item.toolTip = "Manage trusted cloud connections for this workspace"
+            item.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Connections")
             item.target = self
-            item.action = #selector(openCatalog)
-            item.isBordered = true
-            return item
-        case "kofi":
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Support"
-            item.toolTip = "Enjoying EZ Cloud Manager? Support it on Ko-fi ♥"
-            let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-            let heart = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: "Support on Ko-fi")?
-                .withSymbolConfiguration(cfg)
-            let button = PulsingHeartButton(image: heart ?? NSImage(), target: self, action: #selector(openKoFi))
-            button.isBordered = false
-            button.contentTintColor = NSColor.systemPink
-            item.view = button
+            item.action = #selector(openConnections)
             return item
         default:
             return nil
@@ -104,7 +50,7 @@ extension ProfileWindowController {
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.init("profileSwitcher"), .init("addPlugins"), .flexibleSpace, .init("kofi")]
+        [.init("profileSwitcher"), .flexibleSpace, .init("connections")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -153,6 +99,27 @@ extension ProfileWindowController {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
+        let title = NSTextField(labelWithString: profile.name)
+        title.font = UI.pageTitleFont
+        title.lineBreakMode = .byTruncatingTail
+        title.translatesAutoresizingMaskIntoConstraints = false
+        workspaceTitleLabel = title
+
+        let meta = NSTextField(labelWithString: "")
+        meta.font = UI.captionFont
+        meta.textColor = .secondaryLabelColor
+        meta.translatesAutoresizingMaskIntoConstraints = false
+        workspaceMetaLabel = meta
+
+        let section = UI.sectionCaption("Add-ons")
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [title, meta, separator, section] {
+            container.addSubview(view)
+        }
+
         let empty = buildEmptyState()
         container.addSubview(empty)
         emptyStateView = empty
@@ -163,39 +130,66 @@ extension ProfileWindowController {
 
         for view in [empty, grid] {
             NSLayoutConstraint.activate([
-                view.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+                view.topAnchor.constraint(equalTo: section.bottomAnchor, constant: UI.space8),
                 view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
             ])
         }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: UI.space24),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: UI.space24),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -UI.space24),
+            meta.topAnchor.constraint(equalTo: title.bottomAnchor, constant: UI.space4),
+            meta.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            meta.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -UI.space24),
+            separator.topAnchor.constraint(equalTo: meta.bottomAnchor, constant: UI.space16),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: UI.space24),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -UI.space24),
+            section.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: UI.space16),
+            section.leadingAnchor.constraint(equalTo: separator.leadingAnchor)
+        ])
+        updateWorkspaceHeader()
         return container
+    }
+
+    func updateWorkspaceHeader() {
+        workspaceTitleLabel?.stringValue = profile.name
+        workspaceMetaLabel?.stringValue =
+            "Local by default  ·  Saved \(AppTimestamp.display(profile.savedAt))"
     }
 
     /// The first-run (and always-empty-profile) moment: platform identity
     /// visible immediately, one prominent CTA into the catalog.
     private func buildEmptyState() -> NSView {
-        let iconChip = PluginStyle.iconChip(
-            diameter: 72, radius: 16, fill: NSColor.controlAccentColor.withAlphaComponent(0.12),
-            symbol: "square.grid.2x2.fill", symbolColor: .controlAccentColor, pointSize: 34)
+        let iconChip = NSImageView(image: NSApp.applicationIconImage)
+        iconChip.imageScaling = .scaleProportionallyUpOrDown
+        iconChip.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            iconChip.widthAnchor.constraint(equalToConstant: 72),
+            iconChip.heightAnchor.constraint(equalToConstant: 72)
+        ])
 
-        let title = NSTextField(labelWithString: "Build your cloud workspace")
-        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        let title = NSTextField(labelWithString: "Shape this workspace")
+        title.font = UI.sectionTitleFont
         title.alignment = .center
 
         let subtitle = NSTextField(wrappingLabelWithString:
-            "EZ Cloud Manager is a platform — every capability (accounts, launch templates, and more) is a plugin. Install a few to get started.")
-        subtitle.font = .systemFont(ofSize: 12)
+            "Kervik stays lean. Add only the cloud capabilities this context needs.")
+        subtitle.font = UI.bodyFont
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
         subtitle.maximumNumberOfLines = 3
 
-        let button = NSButton(title: "Add Plugins…", target: self, action: #selector(openCatalog))
+        let button = NSButton(title: "Browse Add-ons…", target: self, action: #selector(openCatalog))
         button.bezelStyle = .rounded
         button.controlSize = .large
+        emptyStateTitleLabel = title
+        emptyStateSubtitleLabel = subtitle
+        emptyStateButton = button
 
-        let hint = NSTextField(labelWithString: "Switch or create profiles from the ▾ menu at the top left.")
-        hint.font = .systemFont(ofSize: 11)
+        let hint = NSTextField(labelWithString: "Switch or create workspaces from the menu in the toolbar.")
+        hint.font = UI.captionFont
         hint.textColor = .tertiaryLabelColor
         hint.alignment = .center
 
@@ -219,15 +213,36 @@ extension ProfileWindowController {
         return container
     }
 
+    func configureEmptyStateForOnboarding() {
+        emptyStateTitleLabel.stringValue = "Shape this workspace"
+        emptyStateSubtitleLabel.stringValue =
+            "Cloud workflows live in add-ons. Choose only the tools this workspace needs."
+        emptyStateButton.title = "Browse Add-ons…"
+        emptyStateButton.target = self
+        emptyStateButton.action = #selector(openCatalog)
+    }
+
+    func configureEmptyStateForError(_ message: String) {
+        emptyStateTitleLabel.stringValue = "Add-ons unavailable"
+        emptyStateSubtitleLabel.stringValue = message
+        emptyStateButton.title = "Try Again"
+        emptyStateButton.target = self
+        emptyStateButton.action = #selector(retryHub)
+    }
+
     /// The plugin grid: a flow layout of uniform cards, one per enabled plugin.
     private func buildGrid() -> NSScrollView {
         let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = NSSize(width: 220, height: 132)
+        layout.itemSize = NSSize(width: 280, height: 144)
         layout.minimumInteritemSpacing = UI.gap
         layout.minimumLineSpacing = UI.gap
         layout.sectionInset = NSEdgeInsets(top: UI.pad, left: UI.pad, bottom: UI.pad, right: UI.pad)
 
-        let collection = NSCollectionView()
+        let collection = HubCollectionView()
+        collection.onActivateSelection = { [weak self, weak collection] in
+            guard let self, let indexPath = collection?.selectionIndexPaths.first else { return }
+            self.activateHubItem(at: indexPath.item)
+        }
         collection.collectionViewLayout = layout
         collection.dataSource = self
         collection.delegate = self
@@ -255,12 +270,15 @@ extension ProfileWindowController {
 protocol HoverableCard: AnyObject {
     var hoverBox: NSBox? { get }
     var hoverTintColor: NSColor { get }
+    var hoverProxy: HoverProxy? { get set }
 }
 
 extension HoverableCard {
     func installHoverTracking(on view: NSView) {
+        let proxy = HoverProxy(handler: self)
+        hoverProxy = proxy
         let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                   owner: HoverProxy(handler: self), userInfo: nil)
+                                   owner: proxy, userInfo: nil)
         view.addTrackingArea(area)
     }
 
@@ -269,7 +287,7 @@ extension HoverableCard {
         box.wantsLayer = true
         box.borderColor = hoverTintColor.withAlphaComponent(0.5)
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.12)
+        CATransaction.setAnimationDuration(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.10)
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
         box.layer?.shadowColor = NSColor.black.cgColor
         box.layer?.shadowOpacity = 0.12
@@ -283,7 +301,7 @@ extension HoverableCard {
         guard let box = hoverBox else { return }
         box.borderColor = .separatorColor
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.12)
+        CATransaction.setAnimationDuration(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.10)
         box.layer?.shadowOpacity = 0
         CATransaction.commit()
         NSCursor.arrow.set()
@@ -293,7 +311,7 @@ extension HoverableCard {
 /// Forwards NSTrackingArea mouse events to a HoverableCard without making
 /// the card itself the tracking-area owner (NSCollectionViewItem is not an
 /// NSResponder subclass suitable for that role in every AppKit version).
-private final class HoverProxy: NSResponder {
+final class HoverProxy: NSResponder {
     weak var handler: HoverableCard?
     init(handler: HoverableCard) {
         self.handler = handler
@@ -302,6 +320,32 @@ private final class HoverProxy: NSResponder {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func mouseEntered(with event: NSEvent) { handler?.hoverEnter() }
     override func mouseExited(with event: NSEvent) { handler?.hoverExit() }
+}
+
+/// A real accessibility button surface for collection cards. Mouse selection
+/// remains owned by NSCollectionView; VoiceOver AXPress calls the same action
+/// directly instead of announcing a button that cannot be activated.
+final class ActionCardBox: NSBox {
+    var onPress: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onPress else { return false }
+        onPress()
+        return true
+    }
+}
+
+/// Adds explicit Return/Space activation to the selected Hub card.
+final class HubCollectionView: NSCollectionView {
+    var onActivateSelection: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 {
+            onActivateSelection?()
+            return
+        }
+        super.keyDown(with: event)
+    }
 }
 
 /// One plugin card in the Hub grid (220×132): a 32×32 icon chip + name in
@@ -318,9 +362,13 @@ final class PluginCardItem: NSCollectionViewItem, HoverableCard {
     private var chip: NSView?
     var hoverBox: NSBox? { view as? NSBox }
     var hoverTintColor: NSColor = .controlAccentColor
+    var hoverProxy: HoverProxy?
+    var onPress: (() -> Void)? {
+        didSet { (view as? ActionCardBox)?.onPress = onPress }
+    }
 
     override func loadView() {
-        let card = NSBox()
+        let card = ActionCardBox()
         card.boxType = .custom
         card.titlePosition = .noTitle
         card.fillColor = .controlBackgroundColor
@@ -329,6 +377,9 @@ final class PluginCardItem: NSCollectionViewItem, HoverableCard {
         card.cornerRadius = UI.cardRadius
         card.contentViewMargins = NSSize(width: UI.cardPad, height: UI.cardPad)
         view = card
+        card.setAccessibilityElement(true)
+        card.setAccessibilityRole(.button)
+        card.onPress = onPress
 
         let content = card.contentView!
         nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -380,6 +431,8 @@ final class PluginCardItem: NSCollectionViewItem, HoverableCard {
         nameLabel.stringValue = plugin.name
         descriptionLabel.stringValue = plugin.description
         pillView.image = PluginStyle.pill(plugin.category)
+        view.setAccessibilityLabel(plugin.name)
+        view.setAccessibilityHelp(plugin.description)
 
         badgesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for cloud in plugin.clouds {
@@ -399,9 +452,13 @@ final class AddPluginTileItem: NSCollectionViewItem, HoverableCard {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("addPluginTile")
     var hoverBox: NSBox? { view as? NSBox }
     let hoverTintColor: NSColor = .controlAccentColor
+    var hoverProxy: HoverProxy?
+    var onPress: (() -> Void)? {
+        didSet { (view as? ActionCardBox)?.onPress = onPress }
+    }
 
     override func loadView() {
-        let card = NSBox()
+        let card = ActionCardBox()
         card.boxType = .custom
         card.titlePosition = .noTitle
         card.fillColor = .clear
@@ -410,6 +467,10 @@ final class AddPluginTileItem: NSCollectionViewItem, HoverableCard {
         card.cornerRadius = UI.cardRadius
         card.contentViewMargins = NSSize(width: UI.cardPad, height: UI.cardPad)
         view = card
+        card.setAccessibilityElement(true)
+        card.setAccessibilityRole(.button)
+        card.setAccessibilityLabel("Browse Add-ons")
+        card.onPress = onPress
         // Dashed border: NSBox draws a solid border, so overlay a dashed
         // CAShapeLayer matching its bounds/radius.
         card.wantsLayer = true
@@ -418,10 +479,10 @@ final class AddPluginTileItem: NSCollectionViewItem, HoverableCard {
             diameter: 44, radius: 12, fill: NSColor.controlAccentColor.withAlphaComponent(0.10),
             symbol: "plus", symbolColor: .controlAccentColor, pointSize: 18)
 
-        let title = NSTextField(labelWithString: "Add Plugins")
+        let title = NSTextField(labelWithString: "Browse Add-ons")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
 
-        let subtitle = NSTextField(labelWithString: "Browse the catalog")
+        let subtitle = NSTextField(labelWithString: "Extend this workspace")
         subtitle.font = .systemFont(ofSize: 11)
         subtitle.textColor = .tertiaryLabelColor
 

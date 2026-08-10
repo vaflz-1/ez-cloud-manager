@@ -1,0 +1,35 @@
+{
+  "$schema": "../addon.schema.json",
+  "schemaVersion": 1,
+  "id": "cloud-accounts",
+  "version": "2.0.0",
+  "publisher": "ezcloud",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "kind": "system",
+  "runtime": { "type": "builtin", "entrypoint": "host:connections" },
+  "requires": {
+    "connectors": [
+      { "id": "aws", "api": ">=1 <2" },
+      { "id": "gcp", "api": ">=1 <2" },
+      { "id": "azure", "api": ">=1 <2" }
+    ]
+  },
+  "name": "Connections",
+  "description": "Manage local cloud connections across AWS, Google Cloud, and Azure.",
+  "icon": "key.fill",
+  "category": "DevOps",
+  "permissions": {
+    "operations": [
+      "aws.credentials.read",
+      "aws.credentials.write",
+      "aws.credentials.delete",
+      "gcp.credentials.read",
+      "gcp.credentials.write",
+      "gcp.credentials.delete",
+      "azure.credentials.read",
+      "azure.credentials.write",
+      "azure.credentials.delete"
+    ]
+  },
+  "contributes": {}
+}

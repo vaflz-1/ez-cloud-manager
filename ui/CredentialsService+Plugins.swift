@@ -8,7 +8,10 @@ private struct PluginUpdateRequest: Encodable {
 /// P1) — the `ezcloud plugins …` verbs.
 extension CredentialsService {
     func listPlugins(profileID: String) throws -> [PluginDescriptor] {
-        try decode(run(["plugins", "list", "--profile", profileID], input: nil))
+        if let cached = cachedPlugins(profileID: profileID) { return cached }
+        let descriptors: [PluginDescriptor] = try decode(run(["plugins", "list", "--profile", profileID], input: nil))
+        storePluginSnapshot(descriptors, profileID: profileID)
+        return descriptors
     }
 
     /// Applies every catalog toggle in one profile mutation. `changes` is a
@@ -17,16 +20,22 @@ extension CredentialsService {
     @discardableResult
     func updatePlugins(profileID: String, changes: [String: Bool]) throws -> Profile {
         let payload = try JSONEncoder().encode(PluginUpdateRequest(changes: changes))
-        return try decode(run(["plugins", "update", "--profile", profileID], inputData: payload))
+        let saved: Profile = try decode(run(["plugins", "update", "--profile", profileID], inputData: payload))
+        storeProfile(saved)
+        return saved
     }
 
     @discardableResult
     func enablePlugin(profileID: String, pluginID: String) throws -> Profile {
-        try decode(run(["plugins", "enable", "--profile", profileID, "--id", pluginID], input: nil))
+        let saved: Profile = try decode(run(["plugins", "enable", "--profile", profileID, "--id", pluginID], input: nil))
+        storeProfile(saved)
+        return saved
     }
 
     @discardableResult
     func disablePlugin(profileID: String, pluginID: String) throws -> Profile {
-        try decode(run(["plugins", "disable", "--profile", profileID, "--id", pluginID], input: nil))
+        let saved: Profile = try decode(run(["plugins", "disable", "--profile", profileID, "--id", pluginID], input: nil))
+        storeProfile(saved)
+        return saved
     }
 }

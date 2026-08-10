@@ -23,6 +23,21 @@ struct ListResponse: Codable {
     let profiles: [ProfileSummary]
 }
 
+/// One provider entry in the versioned, batched Connections snapshot. Errors
+/// are per-provider so one unreadable store cannot hide every healthy one.
+struct ConnectionProviderSnapshot: Codable {
+    let provider: String
+    let displayName: String
+    let path: String?
+    let profiles: [ProfileSummary]
+    let error: String?
+}
+
+struct ConnectionsListResponse: Codable {
+    let protocolVersion: Int
+    let providers: [ConnectionProviderSnapshot]
+}
+
 struct ProfileResponse: Codable {
     let name: String
     let fields: [String: String]
@@ -73,6 +88,18 @@ struct ProviderSchema: Codable {
     func spec(for key: String) -> FieldSpec? {
         byKey[key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
     }
+}
+
+/// First-window snapshot returned by `ezcloud app bootstrap`. The explicit
+/// protocol version lets a newer shell reject an incompatible bundled core
+/// cleanly instead of failing later on an ambiguous decode.
+struct AppBootstrapResponse: Codable {
+    let protocolVersion: Int
+    let providers: [ProviderInfo]
+    let schemas: [String: ProviderSchema]
+    let profiles: [Profile]
+    let activeProfile: Profile
+    let addons: [PluginDescriptor]
 }
 
 // MARK: - Global profiles (platform v2.0, docs/PLATFORM.md)
@@ -160,24 +187,24 @@ struct Profile: Codable {
     var updatedAt: String
 }
 
-/// The Cloud Accounts plugin's own settings shape, stored at
-/// `Profile.settings[PluginID.cloudAccounts]` — moved off the core Profile by
-/// P1.5. Mirrors internal/profile's CloudAccountsSettings; keep in sync by
-/// hand. Only the Cloud Accounts feature decodes this namespace.
+/// The Connections surface's settings shape, stored at the legacy
+/// `Profile.settings[PluginID.cloudAccounts]` namespace for wire
+/// compatibility. Mirrors internal/profile's CloudAccountsSettings; keep in
+/// sync by hand. Only Connections decodes this namespace.
 struct CloudAccountsSettings: Codable, Equatable {
     var showAllAccounts: Bool = false
     var accounts: [AccountRef] = []
 }
 
 extension Profile {
-    /// Decodes this profile's cloud-accounts settings blob, or the zero value
-    /// (no scoping, showAllAccounts false) if absent or malformed — a reader
-    /// must never fail just because a profile hasn't set its scope yet.
+    /// Decodes this workspace's Connections visibility settings. A fresh
+    /// workspace has no blob yet and must show every discovered connection;
+    /// malformed optional UI state follows the same safe, usable default.
     var cloudAccountsSettings: CloudAccountsSettings {
         guard let raw = settings?[PluginID.cloudAccounts],
               let data = try? JSONEncoder().encode(raw),
               let decoded = try? JSONDecoder().decode(CloudAccountsSettings.self, from: data)
-        else { return CloudAccountsSettings() }
+        else { return CloudAccountsSettings(showAllAccounts: true, accounts: []) }
         return decoded
     }
 }
@@ -193,8 +220,12 @@ enum AppTimestamp {
 
     private static let standardParser = ISO8601DateFormatter()
 
+    static func date(_ raw: String) -> Date? {
+        fractionalParser.date(from: raw) ?? standardParser.date(from: raw)
+    }
+
     static func display(_ raw: String) -> String {
-        guard let date = fractionalParser.date(from: raw) ?? standardParser.date(from: raw) else { return raw }
+        guard let date = date(raw) else { return raw }
         return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
     }
 }
@@ -275,7 +306,10 @@ struct PluginDescriptor: Codable, Equatable {
     let icon: String       // SF Symbol name
     let clouds: [String]
     let category: String   // "DevOps" | "DevSecOps" | "AIOps"
+    let kind: String?      // "addon" | "system"; absent on legacy cores
     let enabled: Bool
+
+    var isSystem: Bool { kind == "system" || id == PluginID.cloudAccounts }
 }
 
 /// Mirrors internal/plugin's exported ID constants — keep in sync by hand

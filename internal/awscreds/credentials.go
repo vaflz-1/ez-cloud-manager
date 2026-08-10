@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"ez-cloud-manager/internal/pathlock"
 )
 
 const (
@@ -160,7 +162,7 @@ func Get(path, name string) (Profile, error) {
 	return Profile{Name: model.sections[idx].name, Fields: model.sections[idx].fields()}, nil
 }
 
-func Save(path, name string, fields map[string]string) error {
+func Save(path, name string, fields map[string]string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if err := validateProfileName(name); err != nil {
 		return err
@@ -169,13 +171,21 @@ func Save(path, name string, fields map[string]string) error {
 		fields = map[string]string{}
 	}
 
-	model, err := readModel(path)
-	if err != nil {
+	normalized := normalizeFields(fields)
+	if err := validateFields(normalized); err != nil {
 		return err
 	}
 
-	normalized := normalizeFields(fields)
-	if err := validateFields(normalized); err != nil {
+	release, err := pathlock.Acquire(path)
+	if err != nil {
+		return fmt.Errorf("lock AWS credentials: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+
+	model, err := readModel(path)
+	if err != nil {
 		return err
 	}
 	idx := model.findSection(name)
@@ -189,11 +199,18 @@ func Save(path, name string, fields map[string]string) error {
 	return writeModel(path, model)
 }
 
-func Delete(path, name string) error {
+func Delete(path, name string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("profile name is required")
 	}
+	release, err := pathlock.Acquire(path)
+	if err != nil {
+		return fmt.Errorf("lock AWS credentials: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 
 	model, err := readModel(path)
 	if err != nil {

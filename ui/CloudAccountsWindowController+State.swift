@@ -1,6 +1,53 @@
 import AppKit
 
 extension CloudAccountsWindowController {
+    /// Invalidates every async operation whose result is bound to the current
+    /// detail form. The underlying mutation may still finish safely against
+    /// its captured provider/name, but it must never rebind a newer editor.
+    func beginEditorContextChange() {
+        editorContextGeneration += 1
+        profileLoadGeneration += 1
+        pasteParseGeneration += 1
+        connectionSaveGeneration += 1
+    }
+
+    func setEditorBaseline(provider: String, name: String, fields: [String: String]) {
+        editorBaseline = ConnectionEditorBaseline(provider: provider, name: name, fields: fields)
+    }
+
+    func hasUnsavedConnectionChanges() -> Bool {
+        let unparsedPaste = pasteView != nil
+            && !pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines) != lastAutoParsedPaste
+        guard let baseline = editorBaseline else { return unparsedPaste }
+        let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return baseline.provider != currentEditingProvider()
+            || baseline.name != name
+            || baseline.fields != fieldsDictionary()
+            || unparsedPaste
+    }
+
+    func confirmDiscardConnectionChanges() -> Bool {
+        commitActiveEdits()
+        guard hasUnsavedConnectionChanges() else { return true }
+        let target = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alert = NSAlert()
+        alert.messageText = "Discard unsaved connection changes?"
+        alert.informativeText = target.isEmpty
+            ? "The new connection draft has not been saved."
+            : "Changes to \(target) have not been saved."
+        alert.addButton(withTitle: "Keep Editing")
+        alert.addButton(withTitle: "Discard Changes")
+        guard alert.runModal() == .alertSecondButtonReturn else { return false }
+        setEditorBaseline(
+            provider: currentEditingProvider(),
+            name: target,
+            fields: fieldsDictionary()
+        )
+        lastAutoParsedPaste = pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return true
+    }
+
     /// Provider that owns the profile being edited: the selected profile's
     /// provider, or the provider chosen in the popup for a new profile.
     func currentEditingProvider() -> String {
@@ -12,23 +59,58 @@ extension CloudAccountsWindowController {
     // MARK: - Profile loading / sidebar model
 
     func refreshProfiles(selecting wantedName: String? = nil, provider wantedProvider: String? = nil) {
-        var loadedCount = 0
+        connectionsLoadGeneration += 1
+        let generation = connectionsLoadGeneration
+        let env = profile.envVars.asDictionary()
+        setStatus(profilesByProvider.isEmpty ? "Loading connections…" : "Refreshing connections…")
+        service.runAsync({ try self.service.listConnections(extraEnv: env) }) { [weak self] result in
+            guard let self, generation == self.connectionsLoadGeneration else { return }
+            switch result {
+            case .success(let response):
+                self.applyConnectionsSnapshot(
+                    response,
+                    selecting: wantedName,
+                    provider: wantedProvider
+                )
+            case .failure(let error):
+                self.setStatus("Refresh failed — showing the last snapshot: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func applyConnectionsSnapshot(
+        _ response: ConnectionsListResponse,
+        selecting wantedName: String?,
+        provider wantedProvider: String?
+    ) {
+        // A Foundation/AppKit field editor can still contain the newest
+        // keystrokes while its target model has the previous value. Commit
+        // that editor before deciding whether an async refresh may rebind
+        // the form, otherwise the completion can erase visible input.
+        commitActiveEdits()
+        let preserveDraft = hasUnsavedConnectionChanges()
+        let snapshots = Dictionary(uniqueKeysWithValues: response.providers.map { ($0.provider, $0) })
         let infos = catalog.providers.isEmpty
             ? [ProviderInfo(id: "aws", displayName: "AWS", canActivate: false, activateLabel: nil)]
             : catalog.providers
+        var failures: [String] = []
         for info in infos {
-            do {
-                let response = try service.list(provider: info.id, extraEnv: profile.envVars.asDictionary())
-                profilesByProvider[info.id] = response.profiles.sorted {
-                    $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            guard let snapshot = snapshots[info.id] else {
+                failures.append("\(info.displayName) missing")
+                continue
+            }
+            if let error = snapshot.error, !error.isEmpty {
+                failures.append("\(info.displayName) unavailable")
+                if profilesByProvider[info.id] == nil {
+                    profilesByProvider[info.id] = []
                 }
-                pathsByProvider[info.id] = response.path
-                loadedCount += response.profiles.count
-            } catch {
-                // One broken backend (e.g. unreadable gcloud dir) must not
-                // take down the others; surface it in status, keep going.
-                setStatus("\(info.displayName): \(error.localizedDescription)")
-                profilesByProvider[info.id] = []
+                continue
+            }
+            profilesByProvider[info.id] = snapshot.profiles.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            if let path = snapshot.path {
+                pathsByProvider[info.id] = path
             }
         }
         rebuildSidebarRows()
@@ -37,13 +119,28 @@ extension CloudAccountsWindowController {
         let name = wantedName ?? selectedProfileName
         if let name, let idx = sidebarIndex(ofProfile: name, provider: provider) {
             profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-            loadProfile(provider: provider, name: name)
+            if preserveDraft {
+                updateProfileMode()
+                let loadedCount = profilesByProvider.values.reduce(0) { $0 + $1.count }
+                setStatus("Refreshed \(loadedCount) connection(s) · unsaved draft preserved")
+            } else {
+                loadProfile(provider: provider, name: name)
+            }
         } else {
-            if selectedProfileName == nil && profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if preserveDraft {
+                updateProfileMode()
+                let loadedCount = profilesByProvider.values.reduce(0) { $0 + $1.count }
+                setStatus("Refreshed \(loadedCount) connection(s) · unsaved draft preserved")
+                return
+            }
+            if selectedProfileName == nil
+                && profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 clearDetailForNoSelection()
             }
             updateProfileMode()
-            setStatus("Loaded \(loadedCount) account(s) across \(profilesByProvider.count) provider(s)")
+            let loadedCount = profilesByProvider.values.reduce(0) { $0 + $1.count }
+            let suffix = failures.isEmpty ? "" : " · \(failures.joined(separator: ", "))"
+            setStatus("Loaded \(loadedCount) connection(s)\(suffix)")
         }
     }
 
@@ -85,11 +182,17 @@ extension CloudAccountsWindowController {
         // what was selected, and bring it back the moment the filter relents.
         if let name = selectedProfileName, sidebarIndex(ofProfile: name, provider: selectedProvider) == nil {
             hiddenSelection = (selectedProvider, name)
-            clearDetailForNoSelection()
-            setStatus(query.isEmpty
-                ? "“\(name)” isn’t in this profile’s scope — edit it from the Scope toolbar button, or turn on “show all accounts”"
-                : "“\(name)” is hidden by the filter — clear the search to restore it")
-        } else if selectedProfileName == nil, let hidden = hiddenSelection,
+            if hasUnsavedConnectionChanges() {
+                setStatus("“\(name)” is hidden by the filter · unsaved draft preserved")
+            } else {
+                clearDetailForNoSelection()
+                setStatus(query.isEmpty
+                    ? "“\(name)” isn’t in this workspace’s scope — edit Visible Connections, or show all"
+                    : "“\(name)” is hidden by the filter — clear the search to restore it")
+            }
+        } else if selectedProfileName != nil {
+            hiddenSelection = nil
+        } else if let hidden = hiddenSelection,
                   let idx = sidebarIndex(ofProfile: hidden.name, provider: hidden.provider) {
             hiddenSelection = nil
             profilesTable.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
@@ -108,8 +211,27 @@ extension CloudAccountsWindowController {
     }
 
     func loadProfile(provider: String, name: String) {
-        do {
-            let profileResponse = try service.get(provider: provider, name, extraEnv: profile.envVars.asDictionary())
+        beginEditorContextChange()
+        let generation = profileLoadGeneration
+        let env = profile.envVars.asDictionary()
+        selectedProvider = provider
+        selectedProfileName = name
+        profileNameField.stringValue = name
+        pasteView.string = ""
+        lastAutoParsedPaste = ""
+        fieldRows = []
+        editorBaseline = nil
+        collapsedSections = []
+        reloadFieldsTable()
+        updateVariablesSummary()
+        updateProfileMode()
+        saveButton.isEnabled = false
+        profileModeLabel.stringValue = "Loading connection…"
+        setStatus("Loading \(name)…")
+        service.runAsync({ try self.service.get(provider: provider, name, extraEnv: env) }) { [weak self] result in
+            guard let self, generation == self.profileLoadGeneration else { return }
+            switch result {
+            case .success(let profileResponse):
             hiddenSelection = nil // an explicit selection supersedes the remembered one
             selectedProvider = provider
             selectedProfileName = profileResponse.name
@@ -117,6 +239,7 @@ extension CloudAccountsWindowController {
             pasteView.string = ""
             lastAutoParsedPaste = ""
             fieldRows = rows(from: profileResponse.fields, includeEmptyRecommended: true)
+            setEditorBaseline(provider: provider, name: profileResponse.name, fields: fieldsDictionary())
             resetFieldCollapse()
             reloadFieldsTable()
             syncProviderPopup()
@@ -126,17 +249,20 @@ extension CloudAccountsWindowController {
             updateProfileMode()
             resetConnectionTestState() // never leave a stale result from a different account on screen
             setStatus("Loaded \(profileResponse.name) (\(catalog.providerDisplayName(provider)))")
-        } catch {
-            showError(error.localizedDescription)
+            case .failure(let error):
+                setStatus("Could not load \(name): \(error.localizedDescription)")
+            }
         }
     }
 
     func clearDetailForNoSelection() {
+        beginEditorContextChange()
         selectedProfileName = nil
         profileNameField.stringValue = ""
         pasteView.string = ""
         lastAutoParsedPaste = ""
         fieldRows = []
+        editorBaseline = nil
         collapsedSections = []
         reloadFieldsTable()
         syncProviderPopup()
@@ -321,7 +447,7 @@ extension CloudAccountsWindowController {
 
     func updateVariablesSummary() {
         if fieldRows.isEmpty {
-            variablesSummaryLabel.stringValue = "Select an account or click + to create one"
+            variablesSummaryLabel.stringValue = "Select a connection or click + to create one"
             fieldsEmptyHintLabel?.isHidden = true // sidebar hint ("select a profile") covers this state better
             return
         }
@@ -338,17 +464,17 @@ extension CloudAccountsWindowController {
     func updateProfileMode() {
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty && selectedProfileName == nil && fieldRows.isEmpty {
-            profileModeLabel.stringValue = "No account selected"
-            saveButton.title = "Create Account"
+            profileModeLabel.stringValue = "No connection selected"
+            saveButton.title = "Create Connection"
             saveButton.isEnabled = false
         } else if !name.isEmpty && profileExists(name, provider: currentEditingProvider()) {
-            profileModeLabel.stringValue = "Updating existing account"
-            saveButton.title = "Update Account"
-            saveButton.isEnabled = !fieldRows.isEmpty
+            profileModeLabel.stringValue = "Updating existing connection"
+            saveButton.title = "Save Changes"
+            saveButton.isEnabled = !fieldRows.isEmpty && hasUnsavedConnectionChanges()
         } else {
-            profileModeLabel.stringValue = "Creating new account"
-            saveButton.title = "Create Account"
-            saveButton.isEnabled = !name.isEmpty && !fieldRows.isEmpty
+            profileModeLabel.stringValue = "Creating new connection"
+            saveButton.title = "Create Connection"
+            saveButton.isEnabled = !name.isEmpty && !fieldRows.isEmpty && hasUnsavedConnectionChanges()
         }
         updateActivateButton()
         updateExportButton()
@@ -372,18 +498,22 @@ extension CloudAccountsWindowController {
             return
         }
         updatePasteViewPlaceholder()
+        updateProfileMode()
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(autoParsePastedCredentials), object: nil)
         perform(#selector(autoParsePastedCredentials), with: nil, afterDelay: 0.25)
     }
 
     func setStatus(_ message: String) {
         statusLabel.stringValue = message
+        if window?.isVisible == true {
+            NSAccessibility.post(element: statusLabel as Any, notification: .valueChanged)
+        }
     }
 
     func showError(_ message: String) {
         setStatus("Error")
         let alert = NSAlert()
-        alert.messageText = "EZ Cloud Manager"
+        alert.messageText = Product.name
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()

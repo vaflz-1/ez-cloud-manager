@@ -1,0 +1,22 @@
+{
+  "$schema": "../addon.schema.json",
+  "schemaVersion": 1,
+  "id": "ec2-launch-templates",
+  "version": "2.0.0",
+  "publisher": "ezcloud",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "kind": "addon",
+  "runtime": { "type": "builtin", "entrypoint": "host:ec2-launch-templates" },
+  "requires": { "connectors": [{ "id": "aws", "api": ">=1 <2" }] },
+  "name": "Launch Templates",
+  "description": "Edit EC2 launch templates like plain configs — clone, edit, apply as a new version, roll back.",
+  "icon": "server.rack",
+  "category": "DevOps",
+  "permissions": {
+    "operations": [
+      "aws.ec2.launchTemplates.read",
+      "aws.ec2.launchTemplates.write"
+    ]
+  },
+  "contributes": {}
+}

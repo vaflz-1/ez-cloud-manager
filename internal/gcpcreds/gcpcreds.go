@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"ez-cloud-manager/internal/inifile"
+	"ez-cloud-manager/internal/pathlock"
 )
 
 // nowFunc is swappable in tests that assert backup naming.
@@ -157,7 +158,7 @@ var nameRe = regexp.MustCompile(`^[a-z][-a-z0-9]*$`)
 // Save writes the named configuration, preserving unknown properties and
 // comments already in the file. Keys must be "section.property"; a bare key
 // is treated as core.<key>.
-func Save(root, name string, fields map[string]string) error {
+func Save(root, name string, fields map[string]string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("configuration name %q must match %s (lowercase letters, digits, hyphens)", name, nameRe)
@@ -179,6 +180,13 @@ func Save(root, name string, fields map[string]string) error {
 	}
 
 	path := configFile(root, name)
+	release, err := pathlock.Acquire(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 	model, err := inifile.Read(path)
 	if err != nil {
 		return err
@@ -240,15 +248,22 @@ func splitKey(key string) (string, string) {
 // Delete removes the configuration file (after a timestamped backup).
 // Deleting the active configuration is refused, matching gcloud's behavior
 // — switch first, then delete.
-func Delete(root, name string) error {
+func Delete(root, name string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("configuration name is required")
 	}
+	path := configFile(root, name)
+	release, err := pathlock.Acquire(activeConfigFile(root), path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 	if ActiveName(root) == name {
 		return fmt.Errorf("%q is the active gcloud configuration — activate another configuration first", name)
 	}
-	path := configFile(root, name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -266,12 +281,20 @@ func Delete(root, name string) error {
 // Activate makes name the active gcloud configuration by writing
 // <root>/active_config — exactly what `gcloud config configurations
 // activate` does.
-func Activate(root, name string) error {
+func Activate(root, name string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("configuration name %q is not a valid gcloud configuration name", name)
 	}
-	if _, err := os.Stat(configFile(root, name)); err != nil {
+	path := configFile(root, name)
+	release, err := pathlock.Acquire(activeConfigFile(root), path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("configuration %q does not exist", name)
 	}
 	return inifile.WriteFileAtomic(activeConfigFile(root), []byte(name), false)

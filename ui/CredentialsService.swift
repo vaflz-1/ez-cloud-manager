@@ -1,5 +1,32 @@
 import Foundation
 
+private final class PipeDrain: @unchecked Sendable {
+    private let handle: FileHandle
+    private let lock = NSLock()
+    private var stored = Data()
+
+    init(_ handle: FileHandle) {
+        self.handle = handle
+    }
+
+    func start(in group: DispatchGroup) {
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let value = handle.readDataToEndOfFile()
+            lock.lock()
+            stored = value
+            lock.unlock()
+            group.leave()
+        }
+    }
+
+    func data() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 /// CredentialsService is the single boundary between the UI and the `ezcloud`
 /// CLI. All subprocess spawning, stdin/stdout piping, and JSON decoding lives
 /// here, so the rest of the app deals only in typed models.
@@ -23,6 +50,10 @@ final class CredentialsService {
     }
 
     private let toolPath: String
+    private let snapshotLock = NSLock()
+    private var profilesByID: [String: Profile] = [:]
+    private var hasCompleteProfileSnapshot = false
+    private var addonCatalogSnapshot: [PluginDescriptor]?
 
     init() {
         if let resource = Bundle.main.path(forResource: "ezcloud", ofType: nil) {
@@ -36,6 +67,110 @@ final class CredentialsService {
                 .deletingLastPathComponent()   // project root
             toolPath = projectRoot.appendingPathComponent("dist/ezcloud").path
         }
+    }
+
+    // MARK: - App-scoped snapshots
+
+    func storeBootstrapSnapshot(_ response: AppBootstrapResponse) {
+        snapshotLock.lock()
+        profilesByID = Dictionary(uniqueKeysWithValues: response.profiles.map { ($0.id, $0) })
+        hasCompleteProfileSnapshot = true
+        addonCatalogSnapshot = response.addons.map {
+            PluginDescriptor(
+                id: $0.id,
+                name: $0.name,
+                description: $0.description,
+                icon: $0.icon,
+                clouds: $0.clouds,
+                category: $0.category,
+                kind: $0.kind,
+                enabled: false
+            )
+        }
+        snapshotLock.unlock()
+    }
+
+    func cachedProfiles() -> [Profile]? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        guard hasCompleteProfileSnapshot else { return nil }
+        return profilesByID.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    func cachedProfile(id: String) -> Profile? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return profilesByID[id]
+    }
+
+    func storeCompleteProfiles(_ profiles: [Profile]) {
+        snapshotLock.lock()
+        profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+        hasCompleteProfileSnapshot = true
+        snapshotLock.unlock()
+    }
+
+    func storeProfile(_ profile: Profile) {
+        snapshotLock.lock()
+        if let current = profilesByID[profile.id],
+           let currentDate = AppTimestamp.date(current.updatedAt),
+           let incomingDate = AppTimestamp.date(profile.updatedAt),
+           incomingDate < currentDate {
+            snapshotLock.unlock()
+            return
+        }
+        profilesByID[profile.id] = profile
+        snapshotLock.unlock()
+    }
+
+    func removeCachedProfile(id: String) {
+        snapshotLock.lock()
+        profilesByID.removeValue(forKey: id)
+        snapshotLock.unlock()
+    }
+
+    func cachedPlugins(profileID: String) -> [PluginDescriptor]? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        guard let catalog = addonCatalogSnapshot,
+              let profile = profilesByID[profileID]
+        else { return nil }
+        let enabled = Set(profile.enabledPlugins)
+        return catalog.map {
+            PluginDescriptor(
+                id: $0.id,
+                name: $0.name,
+                description: $0.description,
+                icon: $0.icon,
+                clouds: $0.clouds,
+                category: $0.category,
+                kind: $0.kind,
+                enabled: enabled.contains($0.id)
+            )
+        }
+    }
+
+    func storePluginSnapshot(_ descriptors: [PluginDescriptor], profileID: String) {
+        snapshotLock.lock()
+        addonCatalogSnapshot = descriptors.map {
+            PluginDescriptor(
+                id: $0.id,
+                name: $0.name,
+                description: $0.description,
+                icon: $0.icon,
+                clouds: $0.clouds,
+                category: $0.category,
+                kind: $0.kind,
+                enabled: false
+            )
+        }
+        if var profile = profilesByID[profileID] {
+            profile.enabledPlugins = descriptors.filter(\.enabled).map(\.id)
+            profilesByID[profileID] = profile
+        }
+        snapshotLock.unlock()
     }
 
     // MARK: - Providers & schemas
@@ -120,16 +255,22 @@ final class CredentialsService {
         process.environment = Self.childEnvironment(extraEnv: extraEnv)
 
         try process.run()
+        let drains = DispatchGroup()
+        let outputDrain = PipeDrain(output.fileHandleForReading)
+        let errorDrain = PipeDrain(errorPipe.fileHandleForReading)
+        outputDrain.start(in: drains)
+        errorDrain.start(in: drains)
         if let inputData {
             input.fileHandleForWriting.write(inputData)
         }
         try? input.fileHandleForWriting.close()
 
-        // Drain stdout before waiting so a large payload cannot deadlock the
-        // pipe; stderr is small (warnings / error text).
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        // Both pipes must drain concurrently. Reading stdout and then stderr
+        // can deadlock when a failed child fills stderr before closing stdout.
         process.waitUntilExit()
+        drains.wait()
+        let data = outputDrain.data()
+        let errorData = errorDrain.data()
 
         if process.terminationStatus != 0 {
             let message = String(data: errorData, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }

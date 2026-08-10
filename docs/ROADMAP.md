@@ -1,4 +1,4 @@
-# EZ Cloud Manager — Roadmap
+# Kervik — Roadmap
 
 Positioning: **the fast, native, local-first multi-cloud config manager for
 macOS.** Free + Ko-fi, no subscription, no telemetry, no Electron.

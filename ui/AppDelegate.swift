@@ -21,24 +21,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// instead of creating a second, divergent edit surface.
     var windowControllers: [String: ProfileWindowController] = [:]
     var profileManagerController: ProfileManagerWindowController?
+    private var workspaceRefreshGeneration = 0
 
     static let koFiURL = URL(string: "https://ko-fi.com/vaflz")!
+    private static let appearanceDefaultsKey = "KervikAppearance"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        applySavedAppearance()
         configureMainMenu()
 
         do {
-            try service.ensureProfilesMigrated()
+            let bootstrap = try service.bootstrap()
+            catalog.load(from: bootstrap)
+            openWindow(
+                for: bootstrap.activeProfile,
+                preloadedProfiles: bootstrap.profiles,
+                preloadedAddons: bootstrap.addons
+            )
         } catch {
-            // Migration failure must not block launch — worst case the app
-            // runs against whatever profile.json files already exist.
-            NSLog("profile migration failed: \(error.localizedDescription)")
-        }
-        do {
-            try catalog.load(using: service)
-        } catch {
-            NSLog("loading providers failed: \(error.localizedDescription)")
+            // Compatibility fallback keeps the shell usable with an older
+            // development CLI while production bundles take the one-call path.
+            NSLog("app bootstrap failed, using compatibility path: \(error.localizedDescription)")
+            do { try service.ensureProfilesMigrated() } catch {
+                NSLog("profile migration failed: \(error.localizedDescription)")
+            }
+            do { try catalog.load(using: service) } catch {
+                NSLog("loading providers failed: \(error.localizedDescription)")
+            }
+            openMostRecentOrDefaultProfile()
         }
 
         NotificationCenter.default.addObserver(forName: .openProfileWindowRequested, object: nil, queue: .main) { [weak self] note in
@@ -60,8 +71,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let change = note.object as? ProfileListChange else { return }
             self?.handleProfileListChange(change)
         }
+        NotificationCenter.default.addObserver(forName: .refreshWorkspaceStateRequested, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshWorkspaceState(nil)
+        }
+        NotificationCenter.default.addObserver(forName: .profileDeletionPreflightRequested, object: nil, queue: .main) { [weak self] note in
+            guard let request = note.object as? ProfileContextChangePreflight,
+                  let controller = self?.windowControllers[request.profileID]
+            else { return }
+            request.allowed = controller.authorizeProfileContextExit()
+        }
+        NotificationCenter.default.addObserver(forName: .profileEnvironmentChangePreflightRequested, object: nil, queue: .main) { [weak self] note in
+            guard let request = note.object as? ProfileContextChangePreflight,
+                  let controller = self?.windowControllers[request.profileID]
+            else { return }
+            request.allowed = controller.authorizeProfileContextExit()
+        }
 
-        openMostRecentOrDefaultProfile()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -75,10 +100,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// requirement; migration guarantees at least one profile always exists.
     private func openMostRecentOrDefaultProfile() {
         guard let profiles = try? service.listProfiles(), !profiles.isEmpty else {
-            showError("No profile could be loaded or created — check that the ezcloud CLI is reachable.")
+            showError("No workspace could be loaded or created — check that the local core is reachable.")
             return
         }
-        let mostRecent = profiles.max { $0.updatedAt < $1.updatedAt } ?? profiles[0]
+        let mostRecent = profiles.max { lhs, rhs in
+            let left = AppTimestamp.date(lhs.updatedAt) ?? .distantPast
+            let right = AppTimestamp.date(rhs.updatedAt) ?? .distantPast
+            return left < right
+        } ?? profiles[0]
         openWindow(forProfile: mostRecent.id)
     }
 
@@ -90,11 +119,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let profile = try? service.getProfile(id: id) else {
-            showError("That profile could not be loaded.")
+            showError("That workspace could not be loaded.")
             return
         }
-        let controller = ProfileWindowController(profile: profile, catalog: catalog, service: service)
-        windowControllers[id] = controller
+        openWindow(for: profile)
+    }
+
+    private func openWindow(
+        for profile: Profile,
+        preloadedProfiles: [Profile]? = nil,
+        preloadedAddons: [PluginDescriptor]? = nil
+    ) {
+        if let existing = windowControllers[profile.id] {
+            existing.show()
+            return
+        }
+        let controller = ProfileWindowController(
+            profile: profile,
+            catalog: catalog,
+            service: service,
+            preloadedProfiles: preloadedProfiles,
+            preloadedAddons: preloadedAddons
+        )
+        windowControllers[profile.id] = controller
         controller.show()
     }
 
@@ -116,14 +163,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let newProfile = try? service.getProfile(id: request.targetProfileID) else {
-            showError("That profile could not be loaded.")
+            showError("That workspace could not be loaded.")
+            request.from.revertProfilePopupSelection()
+            return
+        }
+        guard request.from.rebind(to: newProfile) else {
             request.from.revertProfilePopupSelection()
             return
         }
         if let oldID = windowControllers.first(where: { $0.value === request.from })?.key {
             windowControllers.removeValue(forKey: oldID)
         }
-        request.from.rebind(to: newProfile)
         windowControllers[request.targetProfileID] = request.from
     }
 
@@ -143,6 +193,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.show()
     }
 
+    /// Reconciles changes made through the headless CLI in one process, then
+    /// fans the resulting immutable snapshot out in memory. Repeated requests
+    /// are generation-gated so an older completion can never roll state back.
+    @objc func refreshWorkspaceState(_ sender: Any?) {
+        workspaceRefreshGeneration += 1
+        let generation = workspaceRefreshGeneration
+        service.runAsync({ try self.service.readProfilesFromDisk() }) { [weak self] result in
+            guard let self, generation == self.workspaceRefreshGeneration else { return }
+            switch result {
+            case .success(let profiles):
+                let byID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+                for (id, controller) in self.windowControllers {
+                    if !controller.canApplyRefreshedSnapshot(byID[id]) {
+                        return // keep the prior coherent snapshot and the local draft
+                    }
+                }
+                self.service.storeCompleteProfiles(profiles)
+                for (id, controller) in Array(self.windowControllers) {
+                    guard let updated = byID[id] else {
+                        self.windowControllers.removeValue(forKey: id)
+                        controller.closeAfterProfileDeletion()
+                        continue
+                    }
+                    controller.applyRefreshedSnapshot(updated, allProfiles: profiles)
+                }
+                self.profileManagerController?.applyRefreshedSnapshot()
+            case .failure(let error):
+                self.showError("Workspace refresh failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// The Help menu's fixed target (see AppDelegate+Menu.swift) — a small,
     /// deliberate duplicate of every Hub's own toolbar Ko-fi button rather
     /// than new cross-controller plumbing (this codebase already duplicates
@@ -151,9 +233,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(Self.koFiURL)
     }
 
+    func applySavedAppearance() {
+        let raw = UserDefaults.standard.integer(forKey: Self.appearanceDefaultsKey)
+        let choice = AppAppearance(rawValue: raw) ?? .system
+        NSApp.appearance = choice.appearance
+    }
+
+    @objc func chooseAppearance(_ sender: NSMenuItem) {
+        guard let choice = AppAppearance(rawValue: sender.tag) else { return }
+        UserDefaults.standard.set(choice.rawValue, forKey: Self.appearanceDefaultsKey)
+        NSApp.appearance = choice.appearance
+        sender.menu?.items.forEach { $0.state = $0.tag == choice.rawValue ? .on : .off }
+    }
+
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "EZ Cloud Manager"
+        alert.messageText = Product.name
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()

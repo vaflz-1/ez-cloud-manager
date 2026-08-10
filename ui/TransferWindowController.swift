@@ -93,8 +93,8 @@ final class TransferWindowController: NSWindowController {
     }
 
     private func renderProfile() {
-        window?.title = "Transfer — \(profile.name)"
-        explainerLabel?.stringValue = "Export “\(profile.name)” as a .ezprofile file to hand to another machine, or import a .ezprofile file as a new profile here."
+        window?.title = Product.toolTitle("Transfer", workspace: profile.name)
+        explainerLabel?.stringValue = "Export “\(profile.name)” as a .ezprofile file for another machine, or import one as a new workspace."
         exportButton?.title = "Export “\(profile.name)”…"
     }
 
@@ -123,7 +123,7 @@ final class TransferWindowController: NSWindowController {
             // Deliberately does NOT touch self.profile or this window's
             // title — import always creates a DIFFERENT profile (fresh id),
             // never overwrites the one this Transfer window is scoped to.
-            setStatus("Imported as “\(imported.name)” — use File ▸ New Window with Profile to open it")
+            setStatus("Imported as “\(imported.name)” — use File ▸ New Window with Workspace to open it")
         } catch {
             showError(error.localizedDescription)
         }

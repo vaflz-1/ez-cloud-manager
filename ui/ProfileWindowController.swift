@@ -44,9 +44,18 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     var collectionView: NSCollectionView!
     var emptyStateView: NSView!
+    var emptyStateTitleLabel: NSTextField!
+    var emptyStateSubtitleLabel: NSTextField!
+    var emptyStateButton: NSButton!
     var gridScrollView: NSScrollView!
+    var workspaceTitleLabel: NSTextField!
+    var workspaceMetaLabel: NSTextField!
     /// This profile's enabled plugins, as rendered in the grid.
     var enabledPlugins: [PluginDescriptor] = []
+    /// Bootstrap supplies the first menu and Hub payload in the same IPC.
+    /// After that first paint, ordinary refresh paths remain authoritative.
+    var preloadedProfiles: [Profile]?
+    private var hasRenderedPreloadedHub = false
 
     // MARK: Profile switcher toolbar item (ProfileWindowController+ProfileBar.swift)
 
@@ -54,10 +63,19 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// lists every profile, selection reflects THIS window's own profile.
     var profileBarPopup: NSPopUpButton!
 
-    init(profile: Profile, catalog: ProviderCatalog, service: CredentialsService) {
+    init(
+        profile: Profile,
+        catalog: ProviderCatalog,
+        service: CredentialsService,
+        preloadedProfiles: [Profile]? = nil,
+        preloadedAddons: [PluginDescriptor]? = nil
+    ) {
         self.profile = profile
         self.catalog = catalog
         self.service = service
+        self.preloadedProfiles = preloadedProfiles
+        self.enabledPlugins = preloadedAddons?.filter { $0.enabled && !$0.isSystem } ?? []
+        self.hasRenderedPreloadedHub = preloadedAddons != nil
         super.init(window: nil)
         buildWindow()
         window?.delegate = self
@@ -80,12 +98,33 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        refreshHub()
+        if hasRenderedPreloadedHub {
+            hasRenderedPreloadedHub = false
+            renderHub()
+        } else {
+            refreshHub()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
         closeProfileBoundControllers()
         NotificationCenter.default.post(name: .profileWindowWillClose, object: self)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        authorizeProfileContextExit()
+    }
+
+    /// Programmatic lifecycle paths do not call NSWindowDelegate's
+    /// windowShouldClose. Every rebind/delete/external-context transition must
+    /// explicitly pass this same draft guard before closing Connections.
+    func authorizeProfileContextExit() -> Bool {
+        cloudAccountsController?.confirmDiscardConnectionChanges() ?? true
+    }
+
+    func canApplyRefreshedSnapshot(_ updated: Profile?) -> Bool {
+        guard updated == nil || updated?.envVars != profile.envVars else { return true }
+        return authorizeProfileContextExit()
     }
 
     /// The Profile Manager saved a change to this window's profile (name,
@@ -99,8 +138,14 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
         guard changedID == profile.id else { return }
         guard let updated = try? service.getProfile(id: profile.id) else { return }
         let environmentChanged = profile.envVars != updated.envVars
+        // The normal Profile Manager path asks before persisting an env
+        // change. Keep this defensive gate for any future caller that posts
+        // the notification directly: a live Connections draft remains bound
+        // to its original cloud context until the user chooses to discard it.
+        guard !environmentChanged || authorizeProfileContextExit() else { return }
         profile = updated
-        window?.title = "EZ Cloud Manager — \(updated.name)"
+        window?.title = Product.workspaceTitle(updated.name)
+        updateWorkspaceHeader()
         refreshHub()
         reconcileProfileBoundControllers(environmentChanged: environmentChanged)
     }
@@ -127,12 +172,16 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// profile — the Hub profile switcher's normal path when the target has
     /// no window of its own already open (see AppDelegate's
     /// `.profileSwitchRequested` handler, which chooses refocus-vs-rebind).
-    func rebind(to newProfile: Profile) {
+    @discardableResult
+    func rebind(to newProfile: Profile) -> Bool {
+        guard authorizeProfileContextExit() else { return false }
         closeProfileBoundControllers()
         profile = newProfile
-        window?.title = "EZ Cloud Manager — \(newProfile.name)"
+        window?.title = Product.workspaceTitle(newProfile.name)
+        updateWorkspaceHeader()
         refreshHub()
         reloadProfileBar(selecting: newProfile.id)
+        return true
     }
 
     /// Snaps the profile switcher's popup back to THIS window's own profile
@@ -142,6 +191,20 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     /// isn't actually bound to.
     func revertProfilePopupSelection() {
         reloadProfileBar(selecting: profile.id)
+    }
+
+    /// Applies one explicit app-wide disk refresh without launching another
+    /// subprocess per open window. CredentialsService has already replaced
+    /// its immutable snapshot before AppDelegate calls this method.
+    func applyRefreshedSnapshot(_ updated: Profile, allProfiles: [Profile]) {
+        let environmentChanged = profile.envVars != updated.envVars
+        profile = updated
+        preloadedProfiles = allProfiles
+        window?.title = Product.workspaceTitle(updated.name)
+        updateWorkspaceHeader()
+        reloadProfileBar(selecting: updated.id)
+        refreshHub()
+        reconcileProfileBoundControllers(environmentChanged: environmentChanged)
     }
 }
 
@@ -165,4 +228,23 @@ extension Notification.Name {
     /// or refocus an already-open window for the target profile (the
     /// one-window-per-profile invariant must never be broken).
     static let profileSwitchRequested = Notification.Name("EZCloudManager.profileSwitchRequested")
+    /// Posted by Workspaces on show, and available from File → Refresh, so
+    /// mutations made through the headless CLI become visible without an app
+    /// restart. AppDelegate coalesces it into one fresh profile-list process.
+    static let refreshWorkspaceStateRequested = Notification.Name("Kervik.refreshWorkspaceStateRequested")
+    /// Synchronous preflight before an in-app workspace delete reaches disk.
+    static let profileDeletionPreflightRequested = Notification.Name("Kervik.profileDeletionPreflightRequested")
+    /// Synchronous preflight before an in-app environment change reaches
+    /// disk. Addon sessions must never be moved across cloud contexts with a
+    /// local draft still attached.
+    static let profileEnvironmentChangePreflightRequested = Notification.Name("Kervik.profileEnvironmentChangePreflightRequested")
+}
+
+final class ProfileContextChangePreflight {
+    let profileID: String
+    var allowed = true
+
+    init(profileID: String) {
+        self.profileID = profileID
+    }
 }

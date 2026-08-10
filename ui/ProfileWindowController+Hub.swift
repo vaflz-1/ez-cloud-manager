@@ -34,9 +34,11 @@ extension ProfileWindowController {
     func reconcileProfileBoundControllers(environmentChanged: Bool) {
         let enabled = Set(profile.enabledPlugins)
 
-        if environmentChanged || !enabled.contains(PluginID.cloudAccounts) {
+        if environmentChanged {
             cloudAccountsController?.close()
             cloudAccountsController = nil
+        } else {
+            cloudAccountsController?.updateOwningProfile(profile)
         }
 
         if enabled.contains(PluginID.launchTemplates), !environmentChanged {
@@ -55,11 +57,33 @@ extension ProfileWindowController {
     }
 
     func refreshHub() {
-        let all = (try? service.listPlugins(profileID: profile.id)) ?? []
-        enabledPlugins = all.filter { $0.enabled }
+        do {
+            enabledPlugins = try service.listPlugins(profileID: profile.id).filter { $0.enabled && !$0.isSystem }
+            renderHub()
+        } catch {
+            showHubError(error.localizedDescription)
+        }
+    }
+
+    func renderHub() {
+        if enabledPlugins.isEmpty {
+            configureEmptyStateForOnboarding()
+        }
         emptyStateView.isHidden = !enabledPlugins.isEmpty
         gridScrollView.isHidden = enabledPlugins.isEmpty
         collectionView.reloadData()
+    }
+
+    @objc func retryHub() {
+        refreshHub()
+    }
+
+    private func showHubError(_ message: String) {
+        enabledPlugins = []
+        emptyStateView.isHidden = false
+        gridScrollView.isHidden = true
+        collectionView.reloadData()
+        configureEmptyStateForError(message)
     }
 
     // MARK: - NSCollectionViewDataSource
@@ -75,11 +99,15 @@ extension ProfileWindowController {
 
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         if indexPath.item == enabledPlugins.count {
-            return collectionView.makeItem(withIdentifier: AddPluginTileItem.reuseIdentifier, for: indexPath)
+            let item = collectionView.makeItem(withIdentifier: AddPluginTileItem.reuseIdentifier, for: indexPath)
+            (item as? AddPluginTileItem)?.onPress = { [weak self] in self?.openCatalog() }
+            return item
         }
         let item = collectionView.makeItem(withIdentifier: PluginCardItem.reuseIdentifier, for: indexPath)
         if let card = item as? PluginCardItem, indexPath.item < enabledPlugins.count {
-            card.configure(enabledPlugins[indexPath.item])
+            let plugin = enabledPlugins[indexPath.item]
+            card.configure(plugin)
+            card.onPress = { [weak self] in self?.openPlugin(id: plugin.id) }
         }
         return item
     }
@@ -89,6 +117,10 @@ extension ProfileWindowController {
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         defer { collectionView.deselectItems(at: indexPaths) }
         guard let idx = indexPaths.first?.item else { return }
+        activateHubItem(at: idx)
+    }
+
+    func activateHubItem(at idx: Int) {
         if idx == enabledPlugins.count {
             openCatalog()
             return
@@ -126,6 +158,16 @@ extension ProfileWindowController {
         catalogController = controller
         guard let win = window else { return }
         controller.present(on: win)
+    }
+
+    @objc func openConnections() {
+        let controller = cloudAccountsController ?? CloudAccountsWindowController(
+            profile: profile,
+            catalog: catalog,
+            service: service
+        )
+        cloudAccountsController = controller
+        controller.show()
     }
 
     @objc func openManageProfiles() {

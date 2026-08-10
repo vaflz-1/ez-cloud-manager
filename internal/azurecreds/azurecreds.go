@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"ez-cloud-manager/internal/inifile"
+	"ez-cloud-manager/internal/pathlock"
 )
 
 const (
@@ -114,7 +115,7 @@ func Get(path, name string) (Profile, error) {
 	return Profile{Name: model.Sections[idx].Name, Fields: model.Sections[idx].Fields()}, nil
 }
 
-func Save(path, name string, fields map[string]string) error {
+func Save(path, name string, fields map[string]string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if err := inifile.ValidateSectionName(name); err != nil {
 		return err
@@ -125,6 +126,13 @@ func Save(path, name string, fields map[string]string) error {
 			return err
 		}
 	}
+	release, err := pathlock.Acquire(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 
 	model, err := inifile.Read(path)
 	if err != nil {
@@ -139,11 +147,18 @@ func Save(path, name string, fields map[string]string) error {
 	return inifile.WriteAtomic(path, model, true)
 }
 
-func Delete(path, name string) error {
+func Delete(path, name string) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("profile name is required")
 	}
+	release, err := pathlock.Acquire(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 	model, err := inifile.Read(path)
 	if err != nil {
 		return err

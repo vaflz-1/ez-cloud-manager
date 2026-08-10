@@ -1,227 +1,266 @@
-# EZ Cloud Manager v2.0 — Platform Architecture
+# Kervik Platform Architecture
 
-Status: **design accepted; P0–P1 implemented, P2–P5 planned** (August 2026).
-Supersedes the monolith model of v1.x; v1.2–v1.4 roadmap items become
-*plugins* on this platform instead of core features.
+Status: **P0–P2 foundation: compiled runtime, physical package contracts;
+permission broker and declarative loading are next** (August 2026).
 
-## Vision
+Kervik is a native local control plane. The host is deliberately small;
+Connections provide trusted access to clouds and self-hosted targets; Add-ons
+provide the workflows users install. See [PRODUCT_DNA.md](PRODUCT_DNA.md) for
+the product and interaction contract.
 
-A native macOS **platform for DevOps / DevSecOps / AIOps** — what VS Code
-is to editing and Jenkins is to CI, this app is to cloud operations.
-The application ships as a thin **skeleton**; every capability (EC2
-templates, Lambda browser, IAM helper, k8s cluster monitor, even the
-plugin manager itself) is a **plugin**. Everything a plugin contributes is
-**declarative**, so any LLM — "even the crookedest one" — can generate,
-install, and configure plugins for the user, with live UI refresh showing
-which buttons/menus appear.
+## Canonical model
 
-Goals, in the user's words:
+| Layer | Owns | Must not own |
+|---|---|---|
+| Platform | native shell, Workspaces, Add-on lifecycle, Connections UI, permissions, themes, audit, updates, renderer and broker | provider-specific workflows |
+| Connector | discovery, auth/session, credential-store integration, target resolution, safe environment, timeout/cancel, redaction and typed operations | EC2/Kubernetes/Terraform UX |
+| Target | a configured AWS account, GCP project, Azure subscription, SSH host, device, cluster or self-hosted service | credentials exposed to Add-ons |
+| Add-on | manifest, views, settings, workflows and requested connector operations | credential files, raw tokens or ambient environment |
 
-- Feature parity with (and beyond) the vendor CLIs — expose what the
-  console/CLI *can't* do comfortably: cross-region live views, visual
-  diffs, copy-edit-recreate flows, one-click context switching.
-- Don't fear growing the UI. The skeleton stays small; plugins grow it.
-- Jenkins/VS Code-grade standards for plugin lifecycle and extension API.
+User-facing vocabulary is Platform / Workspace / Connection / Connector /
+Add-on. Legacy code and wire contracts still use `profile`, `provider` and
+`plugin`; those names remain read-compatible during migration.
 
-## UX principles (binding, July 2026)
+## Required boundary
 
-1. **Menu bar is minimal and basic.** Every menu-bar action must also be
-   reachable from the in-window UI; menus mirror the interface, they never
-   hold exclusive functionality.
-2. **Empty skeleton first.** On first run the app looks deliberately
-   empty: profile selector, settings, and a plugin hub that offers
-   installing plugins. The platform identity must be visible in the first
-   minute of use.
-3. **Plugins open separately.** Each plugin presents as a module/card in
-   the hub and opens in its own window or clearly bounded section — never
-   silently woven into a monolithic main window.
-4. **Low-code for DevOps.** The end state is a graphical environment
-   covering the full vendor-CLI capability surface; every flow favors
-   visual, declarative interaction over memorizing CLI incantations.
-5. **Core owns no plugin data.** A core profile is exactly: name, env
-   vars, enabled plugins, per-plugin settings blobs, window state.
-   Anything domain-specific (e.g. the Cloud Accounts scoping list) lives
-   in the owning plugin's settings namespace and is edited in that
-   plugin's UI, never in the core profile editor.
-6. **Errors are guided flows.** A blocked operation (e.g. deleting the
-   active gcloud configuration) must offer the unblocking action in
-   place, not a bare error dialog.
-
-## Core vs. plugins
-
-**Core (the skeleton)** contains ONLY:
-
-| Area | Contents |
-|---|---|
-| Profile engine | Global profiles: name, env vars, enabled plugin ids, opaque per-plugin settings, window state; multi-window (one window ⇄ one profile) |
-| Provider base | The 3 cloud adapters (aws/gcp/az CLI detection, auth/session state) — *rails*, no features |
-| Plugin host | Manifest loader, contribution registry, declarative-view renderer, JSON-RPC runtime, hot reload |
-| Settings | Light-IDE-style settings window; per-profile overrides |
-| Security services | Credential broker, permission enforcement, audit log (existing `internal/audit`) |
-| Bootstrap loader | Just enough to install the **Plugin Manager plugin** on first run |
-
-Everything else — including the plugin manager / marketplace UI — is a
-plugin. First-party seed plugins (installed by default, removable):
-
-`plugin-manager` · `profiles-import` (Leapp/Granted/aws-vault) ·
-`ec2-launch-templates` (extracted from v1.1) · `ec2-instances`
-(all-regions live view) · `lambda-browser` · `iam-helper` ·
-`sso-sessions` · `k8s-clusters` (contexts + live status) ·
-`env-projects` (.env profiles) · `secrets-browser` (SSM/Secret
-Manager/Key Vault).
-
-Profile mutations follow the same ownership boundary: the core editor
-updates only `name`/`envVars`, the catalog patches enabled plugin ids in one
-Apply, and a plugin can replace only its own settings namespace. The Go core
-assigns `updatedAt` after each successful persisted mutation; `savedAt`
-changes only for an explicit core-profile save/rename and is the timestamp the
-Profile Manager shows. Core saves compare the editor's original name/env
-snapshot before writing, while a root-wide lock protects unique names and the
-"at least one profile" invariant across concurrent processes.
-
-## Plugin runtime — two tiers
-
-### Tier 1: Declarative plugins (the default, AI-first)
-
-A plugin is a directory with `plugin.json` (+ optional YAML view specs +
-icons). **No code executes.** Behavior = command templates the core runs
-through the credential broker; UI = view specs the core renders natively.
-This is the tier any LLM can write; it is sandbox-safe by construction.
-
-### Tier 2: Native plugins (escape hatch)
-
-A separate executable speaking **JSON-RPC 2.0 over stdio** (a
-language-neutral, LSP-style process boundary — not HashiCorp go-plugin,
-which uses a different protocol stack). No dylib loading is required, and
-the runtime works with Go or any other language. A handshake declares the
-protocol version; core supervises the process per profile. Required only
-for logic that can't be expressed
-declaratively (streaming, computation, custom protocols).
-
-## Manifest & contribution points
+An Add-on invokes a structured operation:
 
 ```json
 {
+  "addon": "ezcloud.ec2-launch-templates",
+  "connector": "aws",
+  "target": "target-id",
+  "operation": "aws.ec2.launchTemplates.list",
+  "input": { "region": "eu-west-1" },
+  "timeoutMs": 15000
+}
+```
+
+The broker checks the Add-on's declared operation permission, resolves the
+target inside the Connector, constructs argv or an SDK request without a
+shell, applies a minimal environment, redacts the result and audits the
+decision. The Add-on receives typed JSON only. It never receives a token,
+credential path or the host process environment.
+
+Connector administration is a separate core-only API. Add-ons cannot call
+raw credential `Get/Save/Delete`; the current `provider.Provider` interface is
+therefore an implementation seed, not the public Add-on SDK.
+
+## Source layout target
+
+```text
+app/macos/platform/                 # AppDelegate, shell, renderer, theme
+cmd/kervik/                         # headless host (ezcloud compatibility alias)
+internal/platform/
+  addons/{registry,loader,runtime}/
+  connections/{broker,policy,session}/
+  profiles/
+  security/{audit,secrets,signatures}/
+  transport/jsonrpc/
+addons/
+  ec2-launch-templates/
+    addon.json
+    backend/ ui/ views/ resources/ tests/
+  transfer/
+    addon.json
+    backend/ ui/ tests/
+connectors/
+  aws/    connector.json api.json runtime/ tests/
+  gcp/    connector.json api.json runtime/ tests/
+  azure/  connector.json api.json runtime/ tests/
+sdk/{addonapi,connectorapi}/
+schemas/{addon,connector,view,settings}.schema.json
+```
+
+Connections and Add-on management are non-removable Platform surfaces. The
+current `cloud-accounts` built-in migrates into Connections. Launch Templates
+becomes a real AWS-dependent Add-on. Transfer may remain a signed privileged
+system Add-on, but only through a narrow Workspace export/import API.
+
+The source tree now contains versioned `addons/` and `connectors/` contracts,
+embedded through `packageassets.go`; `internal/plugin.Builtins()` validates
+those manifests instead of duplicating their catalog metadata. Implementations
+are still compiled from `internal/` and `ui/`, and Swift opens known built-in
+entrypoints through a switch. That remaining runtime boundary is explicit:
+manifest discovery is real, dynamic loading and sandboxing are not shipped yet.
+
+Connections is exposed as a permanent Platform toolbar surface and its
+transitional manifest is `kind: "system"`, so it is not offered as a removable
+Add-on. The legacy `cloud-accounts` ID remains stored for profile compatibility.
+
+## Package contracts
+
+Example `addons/ec2-launch-templates/addon.json`:
+
+```json
+{
+  "$schema": "../addon.schema.json",
+  "schemaVersion": 1,
   "id": "ec2-launch-templates",
   "version": "2.0.0",
   "publisher": "ezcloud",
-  "engines": { "ezcloud": ">=2.0" },
-  "clouds": ["aws"],
-  "runtime": "declarative",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "kind": "addon",
+  "runtime": { "type": "builtin", "entrypoint": "host:ec2-launch-templates" },
+  "requires": { "connectors": [{ "id": "aws", "api": ">=1 <2" }] },
+  "name": "Launch Templates",
+  "description": "Edit EC2 launch templates like plain configs.",
+  "icon": "server.rack",
+  "category": "DevOps",
   "permissions": {
-    "cli": ["aws ec2 describe-launch-template*", "aws ec2 create-launch-template*", "aws ec2 delete-launch-template"],
-    "env": ["AWS_PROFILE", "AWS_REGION"],
-    "network": "none"
+    "operations": [
+      "aws.ec2.launchTemplates.read",
+      "aws.ec2.launchTemplates.write"
+    ]
   },
-  "contributes": {
-    "menus":    [{ "menu": "cloud/aws", "label": "Launch Templates", "command": "lt.open" }],
-    "sidebar":  [{ "section": "AWS", "id": "lt.tree", "view": "views/lt-tree.yaml" }],
-    "views":    [{ "id": "lt.table", "spec": "views/lt-table.yaml" }],
-    "settings": [{ "pane": "Launch Templates", "schema": "settings.schema.json" }],
-    "commands": [{ "id": "lt.copyEdit", "title": "Duplicate & Edit…",
-                   "exec": "aws ec2 create-launch-template --cli-input-json {payload}" }],
-    "resources": [{ "type": "aws/launch-template",
-                    "list": "aws ec2 describe-launch-templates --output json",
-                    "bind": "$.LaunchTemplates[*]",
-                    "verbs": ["create", "delete", "duplicate-edit"] }]
+  "contributes": {}
+}
+```
+
+Example `connectors/aws/connector.json`:
+
+```json
+{
+  "$schema": "../connector.schema.json",
+  "schemaVersion": 1,
+  "id": "aws",
+  "version": "2.0.0",
+  "apiVersion": "1.0.0",
+  "kind": "cloud",
+  "publisher": "ezcloud",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "runtime": { "type": "builtin", "entrypoint": "host:aws" },
+  "name": "Amazon Web Services",
+  "description": "Local AWS connection and credential storage.",
+  "icon": "cloud.fill",
+  "provides": {
+    "operations": [
+      "aws.credentials.read",
+      "aws.credentials.write",
+      "aws.credentials.delete",
+      "aws.ec2.launchTemplates.read",
+      "aws.ec2.launchTemplates.write"
+    ]
   }
 }
 ```
 
-Contribution points (VS Code-style, rendered natively by core):
+These examples describe the packages shipped today: metadata is
+manifest-driven while implementations remain compiled and trusted. A future
+Tier-1 package changes `runtime.type` to `declarative` and contributes
+schema-backed views only after the renderer and permission broker ship.
 
-- **menus** — items in per-cloud menus and the ⌘K palette
-- **sidebar** — sections/nodes in the sidebar tree
-- **views** — declarative tables/detail panes/forms: columns, JSONPath
-  bindings into CLI output, actions
-- **settings** — JSON Schema → auto-rendered settings pane
-- **commands** — actions bound to CLI templates (Tier 1) or RPC methods (Tier 2)
-- **resources** — typed cloud resources with CRUD verb templates; core
-  provides the generic list/watch/create/edit/delete UI, multi-region
-  fan-out, and refresh. This single point powers "monitor everything
-  running in all regions up to k8s cluster status".
+`schemaVersion`, package `version`, host `engines` and Connector `apiVersion`
+are independent. One canonical ID has one active version initially; the prior
+verified version stays available for rollback. Workspace state stores enabled
+IDs and settings only, never mutable package contents.
 
-## Credential broker (the security core)
+## Target runtime layout (not shipped yet)
 
-Plugins **never see credentials**. A plugin submits a command template;
-core (1) validates it against the plugin's `permissions.cli` allowlist,
-(2) resolves the active profile's env/creds, (3) executes the vendor CLI
-itself, (4) returns parsed JSON, (5) writes an audit entry
-(who/plugin/profile/command/timestamp). Existing v1.x rules stand: tokens
-never proxied, login always via vendor CLI, no telemetry, local-first.
+```text
+Kervik.app/Contents/Resources/
+  Addons/ Connectors/ Schemas/
+~/Library/Application Support/EZCloudManager/  # legacy path retained
+  addons/<publisher>/<id>/<version>/
+  connectors/<publisher>/<id>/<version>/
+  profiles/<id>/profile.json
+  cache/ logs/
+```
 
-Install-time security: permission manifest shown to the user
-(Jenkins-style), registry entries carry sha256 + minisign signature;
-Tier 2 binaries additionally require explicit user consent. DevSecOps
-plugin designs (IAM audit, S3 posture, CloudTrail anomalies) draw on the
-cloud-security skill library during development.
+Bundled packages will be trusted and signed with the app. User-installed
+packages will be immutable: stage → validate schema → verify
+checksum/signature → atomic rename → update an installer-generated index.
+Startup will read the index, not recursively scan the filesystem. Relative
+manifest paths must canonicalize inside the package root; symlink/path escape
+must be rejected.
 
-## Global profiles & multi-window
+Third-party Connectors have a higher trust class than Add-ons. They remain a
+later feature and run as signed supervised processes, never injected dylibs.
 
-A **profile** = named bundle of: cloud accounts/creds references, env
-var sets, enabled plugins (+versions), settings overrides, window/UI
-state. Stored as one folder under
-`~/Library/Application Support/EZCloudManager/profiles/<name>/` —
-export/import = zip the folder or hand over a single `.ezprofile` file.
-Rename/duplicate/edit with zero CLI friction.
+## Target runtime tiers
 
-- Every window is bound to exactly one profile (`File → New Window with
-  Profile…`); two windows = two fully independent contexts (accounts,
-  env, plugins, settings) side by side.
-- Settings resolution: built-in defaults < app-global < profile.
-- The v1.1 `internal/workspace` package is the seed of the profile
-  engine; it gets promoted, not rewritten.
+### Tier 1 — declarative by default
 
-## Marketplace
+Manifest, JSON-schema views, settings and typed connector operations. No
+package code executes. Themes are declarative contributions with zero
+Connection permissions.
 
-- Registry = a git repo with `index.json` (Homebrew-tap model): id,
-  versions, engines range, checksums, signature, category
-  (DevOps/DevSecOps/AIOps/FinOps), clouds.
-- The Plugin Manager plugin browses/searches/installs/updates; the same
-  operations exist headless: `ezcloud plugin install|list|update|remove`.
-- Third-party registries addable per profile (like VS Code galleries /
-  Jenkins update centers). Bundled plugins can be selected at install.
+Tier 1 does **not** expose raw CLI command templates. The Connector builds
+commands or SDK calls after the broker authorizes a typed operation.
 
-## AI-native design
+### Tier 2 — isolated process
 
-1. **Everything declarative + published JSON Schemas** for manifest,
-   views, settings — an LLM writes a valid plugin from schema alone.
-2. `ezcloud plugin scaffold <id>` generates a working skeleton;
-   `ezcloud plugin validate <dir>` lints manifest/permissions/views.
-3. **Hot reload with visible diff**: dropping/editing a plugin folder
-   live-refreshes the UI and badges what changed ("+1 menu, +2 views") —
-   the user watches buttons appear as the AI iterates.
-4. `docs/llms.txt` + schema bundle shipped in-app so any assistant can be
-   pointed at one URL/file to learn the whole extension API.
-5. Headless parity: everything the UI can do exists as `ezcloud` CLI
-   verbs with `--output json`, so agents can drive the app end-to-end.
+A long-lived executable speaks versioned JSON-RPC 2.0 using `Content-Length`
+framing over stdio. This is LSP-style transport, not HashiCorp go-plugin.
+The Platform supplies a narrow cwd and environment, payload/resource limits,
+cancellation, crash supervision and explicit permission consent. Arbitrary
+lifecycle hooks are out of scope.
 
-## Migration map (v1.1 → v2.0)
+## Workspaces and persistence
 
-| v1.1 asset | v2.0 destination |
-|---|---|
-| `internal/workspace` | Profile engine (core) |
-| `internal/provider/{aws,gcp,azure}provider` | Provider base rails (core) |
-| `internal/awscreds`,`gcpcreds`,`azurecreds`,`inifile` | Credential broker backends (core) |
-| `internal/audit` | Audit service (core, extended with plugin attribution) |
-| `internal/awslt` + `ui/LaunchTemplate*` | `ec2-launch-templates` plugin (first extraction, proves the API) |
-| `internal/export`, `ui/AppDelegate+Transfer` | `profiles-import`/export plugin + `.ezprofile` format |
-| `ui/AppDelegate+*` monolith | Split: core shell (window/profile/settings) vs. rendered contributions |
-| `cmd/ezcloud` | Core daemon + `ezcloud plugin …` verbs |
+A Workspace contains name, non-secret env vars, enabled Add-on IDs, opaque
+per-Add-on settings and window state. One window binds to one Workspace.
+Core saves patch name/env with compare-and-swap; Add-on enablement and each
+settings namespace have targeted writers. `savedAt` changes only on explicit
+Workspace save; `updatedAt` tracks every persisted mutation.
 
-## Phases
+Package contents are never profile state. Connector secrets stay in native
+stores/Keychain and are referenced through target IDs.
 
-| Phase | Deliverable | Acceptance |
-|---|---|---|
-| **P0 Profiles** | Global profile engine, multi-window per profile, profile CRUD/rename/export/import UI, per-profile env vars | Two windows on two profiles with different env/accounts simultaneously |
-| **P1 Plugin host** *(shipped July 2026)* | Plugin registry (compile-time "builtin" runtime), per-profile enable/disable, `ezcloud plugins` CLI, Plugin Hub shell (empty state + catalog), Cloud Accounts / Launch Templates / Transfer repackaged as separately-opening built-in plugins, menu-bar diet | Fresh profile → empty hub → enable from catalog → card appears → own window; two profiles hold independent plugin sets |
-| **P2 Plugin manager** | Plugin-manager plugin, registry format, install/update/remove, permission consent UI, signatures | Install a plugin from a git registry through the UI; menu items appear live |
-| **P3 AI layer** | Tier 1 declarative runtime (manifest loading, declarative renderer, credential broker enforcement, hot reload), schemas published, scaffold/validate CLI, llms.txt, live diff badges | `ec2-launch-templates` re-shipped as a Tier 1 declarative plugin; a fresh LLM session generates a working "S3 buckets" plugin from schemas alone |
-| **P4 Resource fleet** | `resources` contribution point at scale: all-regions EC2 live view, k8s clusters status, Tier 2 runtime | Multi-region dashboards; first Tier 2 plugin (streaming) |
-| **P5 DevSecOps pack** | IAM helper, S3/posture audit, secrets browsers, rotation reminders as marketplace plugins | Security pack passes its own audit-log review |
+## Target security invariants
 
-## Non-goals (unchanged from v1.x)
+The broker/installer invariants below are acceptance criteria for the next
+runtime phase, not claims about the current compiled built-ins:
 
-No SaaS/sync, no telemetry, no subscription, no Electron, no app-owned
-token storage. The platform pivot changes *how features ship*, not the
-local-first ethos.
+- No telemetry or hosted sync by default.
+- No Add-on receives credentials, credential paths or raw ambient env.
+- No shell interpolation; Connector owns structured argv/request building.
+- Every process has timeout/cancel and bounded payloads.
+- Mutations are atomic, locked per store and auditable with Add-on, Connector,
+  target, decision, result and duration metadata.
+- Add-on permissions are exact typed operations, not wildcard command strings.
+- Install/update verifies schema, checksum, signature and package-root paths.
+- Tier 2 and external Connectors require explicit consent and sandbox policy.
+
+Already shipped foundations: profile JSON, all three credential backends, and
+audit rotation use stable cross-process locks around full mutation
+transactions. Reads remain lock-free over atomically replaced files.
+
+## Performance model
+
+The Go core is not the measured bottleneck. Local commands take roughly
+2–3 ms; a Swift Foundation Process boundary costs roughly 75–80 ms. Therefore:
+
+- `app bootstrap` returns migration, providers, schemas, Workspaces, selected
+  Workspace and initial Add-on state in one versioned snapshot;
+- `connections list` returns every Connector in one process with per-provider
+  errors;
+- batched Connection reads run off the main thread and stale completions use
+  generation IDs; remaining short local mutations are migrated incrementally;
+- external-package startup will read a validated registry index and lazy-load
+  Add-on views after the dynamic runtime exists;
+- a persistent core comes after request-scoped execution context exists.
+
+Rust is not a platform rewrite target. It is allowed for a profiled CPU-bound
+leaf (large state parsing, streaming logs, crypto or a sandbox runtime) behind
+the same language-neutral API.
+
+## Migration phases
+
+1. **P0 Workspaces — shipped.** Isolated contexts, explicit saves, CAS,
+   timestamps, import/export and one-window-per-Workspace lifecycle.
+2. **P1 Compiled Add-ons — shipped.** Hub, per-Workspace enablement and three
+   separately-opening built-ins. Bootstrap batching is the first performance
+   foundation.
+3. **P2 Boundaries — foundation shipped.** First-party manifests, embedded
+   registry, system Connections surface and per-store locks are present;
+   ConnectionBroker remains the next security boundary.
+4. **P3 Declarative runtime.** Typed Connector broker APIs, native view renderer,
+   installer/signature/index flow; migrate Launch Templates as the proof.
+5. **P4 External runtime.** Supervised JSON-RPC Add-ons, SDK, hot reload in dev,
+   permission receipts and rollback.
+6. **P5 Connector ecosystem.** Signed SSH, Kubernetes, local-device and
+   self-hosted Connectors plus DevSecOps/FinOps Add-on packs.
+
+Compatibility aliases `plugins`, `enabledPlugins`, `ezcloud`, `EZCLOUD_*` and
+`.ezprofile` remain readable for at least one major migration cycle.

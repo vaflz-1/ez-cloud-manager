@@ -57,9 +57,10 @@ func DefaultPath() (string, error) {
 
 // Append writes one Event as a single JSON line. Time is filled with the
 // current UTC time (RFC3339) when empty, and Keys are sorted and deduplicated
-// for stable, readable output. The file is created 0600; the directory 0700.
-// If the log already exceeds maxLogBytes it is rotated first.
-func Append(path string, e Event) error {
+// for stable, readable output. The file is created or repaired to 0600; the
+// directory is 0700. If the log already exceeds maxLogBytes it is rotated
+// first.
+func Append(path string, e Event) (err error) {
 	if strings.TrimSpace(e.Time) == "" {
 		e.Time = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -74,12 +75,26 @@ func Append(path string, e Event) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	release, err := acquireAuditLock(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := release(); err == nil {
+			err = releaseErr
+		}
+	}()
+
 	if err := rotateIfLarge(path); err != nil {
 		return err
 	}
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if _, err := f.Write(line); err != nil {

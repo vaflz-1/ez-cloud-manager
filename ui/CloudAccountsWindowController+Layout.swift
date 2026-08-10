@@ -8,8 +8,8 @@ extension CloudAccountsWindowController {
             backing: .buffered,
             defer: false
         )
-        win.title = "EZ Cloud Manager — \(profile.name)"
-        win.minSize = NSSize(width: 920, height: 640)
+        win.title = Product.toolTitle("Connections", workspace: profile.name)
+        win.minSize = NSSize(width: 920, height: 660)
         win.titlebarAppearsTransparent = true
         win.titleVisibility = .visible
         win.toolbarStyle = .unified
@@ -54,9 +54,9 @@ extension CloudAccountsWindowController {
         switch itemIdentifier.rawValue {
         case "scope":
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Scope"
-            item.toolTip = "Choose which accounts this profile shows"
-            item.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Scope")
+            item.label = "Visible Connections"
+            item.toolTip = "Choose which connections this workspace shows"
+            item.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Visible Connections")
             item.target = self
             item.action = #selector(openScopeSheet)
             item.isBordered = true
@@ -124,7 +124,7 @@ extension CloudAccountsWindowController {
         view.translatesAutoresizingMaskIntoConstraints = false
 
         profileSearchField = NSSearchField()
-        profileSearchField.placeholderString = "Search accounts"
+        profileSearchField.placeholderString = "Search connections"
         profileSearchField.delegate = self
         profileSearchField.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(profileSearchField)
@@ -142,7 +142,7 @@ extension CloudAccountsWindowController {
         profilesTable.intercellSpacing = NSSize(width: 0, height: 2)
         profilesTable.floatsGroupRows = false
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile"))
-        col.title = "Account"
+        col.title = "Connection"
         col.width = 230
         profilesTable.addTableColumn(col)
 

@@ -20,21 +20,53 @@ extension CredentialsService {
     }
 
     func listProfiles() throws -> [Profile] {
-        try decode(run(["profile", "list"], input: nil))
+        if let cached = cachedProfiles() { return cached }
+        return try refreshProfiles()
+    }
+
+    /// Explicit disk refresh for user-requested synchronization with the
+    /// bundled headless CLI. Normal menus and rendering use the app snapshot;
+    /// Command-R and reopening Workspaces pay one process boundary here.
+    func refreshProfiles() throws -> [Profile] {
+        let profiles = try readProfilesFromDisk()
+        storeCompleteProfiles(profiles)
+        return profiles
+    }
+
+    /// Raw fresh read used by AppDelegate's generation-gated refresh. The
+    /// accepted completion commits the snapshot, preventing an older
+    /// concurrent process from overwriting a newer in-memory result.
+    func readProfilesFromDisk() throws -> [Profile] {
+        let profiles: [Profile] = try decode(run(["profile", "list"], input: nil))
+        return profiles
     }
 
     func getProfile(id: String) throws -> Profile {
-        try decode(run(["profile", "show", "--id", id], input: nil))
+        if let cached = cachedProfile(id: id) { return cached }
+        return try refreshProfile(id: id)
+    }
+
+    /// Bypasses the app snapshot when correctness explicitly requires the
+    /// latest on-disk core (currently optimistic-conflict recovery). Ordinary
+    /// rendering stays cache-backed so opening a menu never pays another
+    /// process boundary.
+    func refreshProfile(id: String) throws -> Profile {
+        let profile: Profile = try decode(run(["profile", "show", "--id", id], input: nil))
+        storeProfile(profile)
+        return profile
     }
 
     func createProfile(name: String) throws -> Profile {
         let created: Profile = try decode(run(["profile", "create", "--name", name], input: nil))
+        storeProfile(created)
         postProfileListChange(.created, profileID: created.id)
         return created
     }
 
     func renameProfile(id: String, to newName: String) throws -> Profile {
-        try decode(run(["profile", "rename", "--id", id, "--name", newName], input: nil))
+        let renamed: Profile = try decode(run(["profile", "rename", "--id", id, "--name", newName], input: nil))
+        storeProfile(renamed)
+        return renamed
     }
 
     func duplicateProfile(id: String, as newName: String? = nil) throws -> Profile {
@@ -43,12 +75,14 @@ extension CredentialsService {
             args += ["--name", newName]
         }
         let duplicate: Profile = try decode(run(args, input: nil))
+        storeProfile(duplicate)
         postProfileListChange(.duplicated, profileID: duplicate.id)
         return duplicate
     }
 
     func deleteProfile(id: String) throws {
         _ = try run(["profile", "delete", "--id", id], input: nil)
+        removeCachedProfile(id: id)
         postProfileListChange(.deleted, profileID: id)
     }
 
@@ -70,7 +104,9 @@ extension CredentialsService {
             expectedEnvVars: expectedEnvVars
         )
         let payload = try JSONEncoder().encode(request)
-        return try decode(run(["profile", "save"], inputData: payload))
+        let saved: Profile = try decode(run(["profile", "save"], inputData: payload))
+        storeProfile(saved)
+        return saved
     }
 
     /// Saves ONLY the Cloud Accounts plugin's settings blob (account scoping)
@@ -80,7 +116,9 @@ extension CredentialsService {
     @discardableResult
     func saveCloudAccountsSettings(profileID: String, _ settings: CloudAccountsSettings) throws -> Profile {
         let payload = try JSONEncoder().encode(settings)
-        return try decode(run(["profile", "settings", "set", "--id", profileID, "--plugin", PluginID.cloudAccounts], inputData: payload))
+        let saved: Profile = try decode(run(["profile", "settings", "set", "--id", profileID, "--plugin", PluginID.cloudAccounts], inputData: payload))
+        storeProfile(saved)
+        return saved
     }
 
     /// Writes a `.ezprofile` zip to url. 0600: as sensitive as any other
@@ -95,6 +133,7 @@ extension CredentialsService {
     /// clash is resolved with a suffix on the Go side, never a failure).
     func importProfile(from url: URL) throws -> Profile {
         let imported: Profile = try decode(run(["profile", "import", "--input", url.path], input: nil))
+        storeProfile(imported)
         postProfileListChange(.imported, profileID: imported.id)
         return imported
     }

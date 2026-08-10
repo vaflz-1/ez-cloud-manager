@@ -31,7 +31,7 @@ import Foundation
 /// Members are `internal` (not `private`) because they are shared across
 /// those extension files; the app is a single-module binary, so nothing
 /// leaks.
-final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTextViewDelegate, NSToolbarDelegate {
+final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSTextViewDelegate, NSToolbarDelegate {
     /// The global profile this window is bound to. Re-fetched when the
     /// Profile Manager saves a change to it — see handleProfileDidChange.
     var profile: Profile
@@ -112,6 +112,15 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     var selectedProfileName: String?
     var fieldRows: [FieldRow] = []
     var lastAutoParsedPaste = ""
+    var connectionsLoadGeneration = 0
+    var profileLoadGeneration = 0
+    var pasteParseGeneration = 0
+    var connectionSaveGeneration = 0
+    /// Changes whenever the detail editor is rebound to another connection
+    /// (including a new unsaved one). Async completions must match this token
+    /// before they are allowed to touch the visible form.
+    var editorContextGeneration = 0
+    var editorBaseline: ConnectionEditorBaseline?
 
     /// Presentation layer over `fieldRows`: section headers + field references,
     /// so the flat model drives grouped, collapsible rows (Common/Advanced/…).
@@ -124,6 +133,7 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
         self.service = service
         super.init(window: nil)
         buildWindow()
+        window?.delegate = self
         configureToolbar()
         rebuildProviderPopup()
         NotificationCenter.default.addObserver(self, selector: #selector(handleProfileDidChange(_:)),
@@ -141,7 +151,24 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        refreshProfiles()
+        if hasUnsavedConnectionChanges() {
+            setStatus("Unsaved connection draft preserved")
+        } else {
+            refreshProfiles()
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        confirmDiscardConnectionChanges()
+    }
+
+    /// Rebinds the system Connections surface to a fresh snapshot of the same
+    /// workspace when its execution environment is unchanged. Environment
+    /// changes close the controller instead, so no draft crosses cloud roots.
+    func updateOwningProfile(_ updated: Profile) {
+        profile = updated
+        window?.title = Product.toolTitle("Connections", workspace: updated.name)
+        rebuildSidebarRows()
     }
 
     /// The Profile Manager saved a change to this window's profile (name,
@@ -150,10 +177,8 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     @objc private func handleProfileDidChange(_ note: Notification) {
         guard let changedID = note.object as? String, changedID == profile.id else { return }
         guard let updated = try? service.getProfile(id: profile.id) else { return }
-        profile = updated
-        window?.title = "EZ Cloud Manager — \(updated.name)"
-        rebuildSidebarRows()
-        setStatus("Profile settings updated")
+        updateOwningProfile(updated)
+        setStatus("Workspace settings updated")
     }
 }
 
@@ -176,4 +201,10 @@ enum VarItem {
 enum SidebarRow {
     case header(provider: String, title: String, count: Int)
     case profile(provider: String, name: String)
+}
+
+struct ConnectionEditorBaseline: Equatable {
+    let provider: String
+    let name: String
+    let fields: [String: String]
 }

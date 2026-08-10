@@ -45,7 +45,9 @@ extension CloudAccountsWindowController {
         if tableView == profilesTable {
             guard row >= 0, row < sidebarRows.count else { return false }
             switch sidebarRows[row] {
-            case .profile: return true
+            case .profile(let provider, let name):
+                if provider == selectedProvider, name == selectedProfileName { return true }
+                return confirmDiscardConnectionChanges()
             case .header: return false
             }
         }
@@ -74,7 +76,9 @@ extension CloudAccountsWindowController {
             guard row >= 0, row < sidebarRows.count else {
                 // A click on empty space deselected the row — showing the old
                 // profile's fields past that point is phantom state.
-                if selectedProfileName != nil { clearDetailForNoSelection() }
+                if selectedProfileName != nil, !hasUnsavedConnectionChanges() {
+                    clearDetailForNoSelection()
+                }
                 return
             }
             switch sidebarRows[row] {
@@ -199,6 +203,7 @@ extension CloudAccountsWindowController {
         if typed == displayKey(fieldRows[idx].key) { return }   // blur without change
         fieldRows[idx].key = typed
         updateVariablesSummary()
+        updateProfileMode()
     }
 
     @objc func valueFieldEdited(_ sender: NSTextField) {
@@ -206,6 +211,7 @@ extension CloudAccountsWindowController {
         guard idx >= 0, idx < fieldRows.count else { return }
         fieldRows[idx].value = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         updateVariablesSummary()
+        updateProfileMode()
     }
 
     @objc func toggleRowReveal(_ sender: NSButton) {

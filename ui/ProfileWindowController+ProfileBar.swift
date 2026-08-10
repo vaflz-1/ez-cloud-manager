@@ -26,8 +26,8 @@ extension ProfileWindowController {
 
     func buildProfileSwitcherToolbarItem(identifier: NSToolbarItem.Identifier) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: identifier)
-        item.label = "Profile"
-        item.toolTip = "Switch, create, or manage profiles"
+        item.label = "Workspace"
+        item.toolTip = "Switch, create, or manage workspaces"
 
         let popup = NSPopUpButton()
         popup.pullsDown = false
@@ -50,7 +50,8 @@ extension ProfileWindowController {
     /// being clicked.
     func reloadProfileBar(selecting selectedID: String) {
         guard let popup = profileBarPopup else { return }
-        let all = (try? service.listProfiles()) ?? []
+        let all = preloadedProfiles ?? (try? service.listProfiles()) ?? []
+        preloadedProfiles = nil
         let menu = NSMenu()
         for p in all {
             let item = NSMenuItem(title: p.name, action: #selector(profileRowSelected(_:)), keyEquivalent: "")
@@ -64,10 +65,10 @@ extension ProfileWindowController {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let newItem = NSMenuItem(title: "New Profile…", action: #selector(createProfileFromSwitcher), keyEquivalent: "")
+        let newItem = NSMenuItem(title: "New Workspace…", action: #selector(createProfileFromSwitcher), keyEquivalent: "")
         newItem.target = self
         menu.addItem(newItem)
-        let manageItem = NSMenuItem(title: "Manage Profiles…", action: #selector(openManageProfiles), keyEquivalent: "")
+        let manageItem = NSMenuItem(title: "Manage Workspaces…", action: #selector(openManageProfiles), keyEquivalent: "")
         manageItem.target = self
         menu.addItem(manageItem)
 
@@ -101,7 +102,7 @@ extension ProfileWindowController {
                                              object: ProfileSwitchRequest(from: self, targetProfileID: created.id))
         } catch {
             let alert = NSAlert()
-            alert.messageText = "New Profile"
+            alert.messageText = "New Workspace"
             alert.informativeText = error.localizedDescription
             alert.alertStyle = .warning
             alert.runModal()

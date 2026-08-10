@@ -1,0 +1,17 @@
+{
+  "$schema": "../connector.schema.json",
+  "schemaVersion": 1,
+  "id": "gcp",
+  "version": "2.0.0",
+  "apiVersion": "1.0.0",
+  "kind": "cloud",
+  "publisher": "ezcloud",
+  "engines": { "kervik": ">=2.0.0 <3.0.0", "ezcloud": ">=2.0.0 <3.0.0" },
+  "runtime": { "type": "builtin", "entrypoint": "host:gcp" },
+  "name": "Google Cloud",
+  "description": "Local Google Cloud connection and credential storage.",
+  "icon": "cloud.fill",
+  "provides": {
+    "operations": ["gcp.credentials.read", "gcp.credentials.write", "gcp.credentials.delete"]
+  }
+}

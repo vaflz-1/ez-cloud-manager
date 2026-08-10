@@ -38,6 +38,7 @@ type okResponse struct {
 type providerInfo struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
+	Icon        string `json:"icon"`
 	// CanActivate tells the UI whether to offer a "make active/default"
 	// action for this provider's profiles.
 	CanActivate   bool   `json:"canActivate"`
@@ -56,19 +57,14 @@ func main() {
 	cmd, rest := os.Args[1], os.Args[2:]
 
 	switch cmd {
+	case "app":
+		appCommand(rest)
+	case "connections":
+		connectionsCommand(rest)
 	case "providers":
-		infos := make([]providerInfo, 0)
-		for _, id := range provider.IDs() {
-			p, err := provider.Get(id)
-			if err != nil {
-				fail(err)
-			}
-			info := providerInfo{ID: id, DisplayName: p.DisplayName()}
-			if act, ok := p.(provider.Activator); ok {
-				info.CanActivate = true
-				info.ActivateLabel = act.ActivateLabel()
-			}
-			infos = append(infos, info)
+		infos, err := registeredProviderInfos()
+		if err != nil {
+			fail(err)
 		}
 		writeJSON(infos)
 	case "list", "get", "save", "delete", "parse", "schema", "export", "activate":
@@ -198,7 +194,9 @@ func fail(err error) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  ezcloud providers
+	  ezcloud app bootstrap
+	  ezcloud connections list
+	  ezcloud providers
   ezcloud list     [--provider ID]
   ezcloud get      [--provider ID] --profile NAME
   ezcloud save     [--provider ID] --profile NAME < save.json

@@ -65,7 +65,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
     /// reopened window is never stale.
     func present(owningProfile profile: Profile) {
         owningProfile = profile
-        window?.title = "Launch Templates — \(profile.name)"
+        window?.title = Product.toolTitle("Launch Templates", workspace: profile.name)
         window?.makeKeyAndOrderFront(nil)
         loadAwsProfiles()
     }
@@ -307,7 +307,7 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
             try self.service.applyLaunchTemplate(
                 profile: p, region: r, name: template.name,
                 sourceVersion: source,
-                description: description.isEmpty ? "Edited with EZ Cloud Manager (from v\(source))" : description,
+                description: description.isEmpty ? "Edited with Kervik (from v\(source))" : description,
                 setDefault: setDefault, fields: edits, extraEnv: env)
         }) { [weak self] result in
             guard let self else { return }

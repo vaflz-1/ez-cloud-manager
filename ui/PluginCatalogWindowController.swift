@@ -1,8 +1,8 @@
 import AppKit
 
-/// The "Add Plugins" catalog sheet — every registered plugin
-/// (internal/plugin.Builtins, unfiltered) with a switch reflecting whether
-/// THIS profile has it enabled. Switches edit a local draft; Apply sends one
+/// The Add-ons catalog sheet — every user-manageable registered add-on with
+/// a checkbox reflecting whether this workspace has it enabled. Checkboxes
+/// edit a local draft; Apply sends one
 /// bulk patch, causing one profile write and one updatedAt change regardless
 /// of how many addons were toggled.
 final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
@@ -14,6 +14,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     private var table: NSTableView!
     private var statusLabel: NSTextField!
     private var applyButton: NSButton!
+    private var refreshGeneration = 0
 
     init(service: CredentialsService, profileID: String) {
         self.service = service
@@ -30,11 +31,34 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         reload()
         guard let win = window else { return }
         parent.beginSheet(win, completionHandler: nil)
+        refreshFromDisk()
+    }
+
+    /// A catalog open is an explicit synchronization point with the headless
+    /// CLI. It refreshes only this workspace, off the main thread, and never
+    /// discards a toggle the user managed to make while the read was running.
+    private func refreshFromDisk() {
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        statusLabel.stringValue = "Refreshing workspace state…"
+        service.runAsync({ try self.service.refreshProfile(id: self.profileID) }) { [weak self] result in
+            guard let self, generation == self.refreshGeneration else { return }
+            switch result {
+            case .success:
+                if self.draftEnabled == self.baselineEnabled {
+                    self.reload()
+                } else {
+                    self.statusLabel.stringValue = "Workspace refreshed · local draft preserved"
+                }
+            case .failure(let error):
+                self.statusLabel.stringValue = "Refresh failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func reload() {
         do {
-            descriptors = try service.listPlugins(profileID: profileID)
+            descriptors = try service.listPlugins(profileID: profileID).filter { !$0.isSystem }
             baselineEnabled = Set(descriptors.filter(\.enabled).map(\.id))
             draftEnabled = baselineEnabled
             table.reloadData()
@@ -59,7 +83,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = "Add Plugins"
+        win.title = "Add-ons"
         self.window = win
 
         let content = NSView()
@@ -116,6 +140,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     }
 
     @objc private func dismiss() {
+        refreshGeneration += 1
         guard let win = window, let parent = win.sheetParent else { window?.close(); return }
         parent.endSheet(win)
     }
@@ -133,7 +158,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         return cell
     }
 
-    @objc private func toggled(_ sender: NSSwitch) {
+    @objc private func toggled(_ sender: NSButton) {
         let row = sender.tag
         guard row >= 0, row < descriptors.count else { return }
         let plugin = descriptors[row]
@@ -143,7 +168,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             draftEnabled.remove(plugin.id)
         }
         updateApplyButton()
-        statusLabel.stringValue = "Unsaved plugin changes"
+        statusLabel.stringValue = "Unsaved add-on changes"
     }
 
     private func updateApplyButton() {
@@ -162,7 +187,14 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             guard let self else { return }
             switch result {
             case .success(let saved):
-                self.baselineEnabled = submitted
+                // The targeted core preserves unrelated concurrent add-on
+                // changes. Recompose from the canonical saved Profile instead
+                // of assuming our submitted draft is the entire enabled set.
+                self.descriptors = (self.service.cachedPlugins(profileID: saved.id) ?? self.descriptors)
+                    .filter { !$0.isSystem }
+                self.baselineEnabled = Set(self.descriptors.filter(\.enabled).map(\.id))
+                self.draftEnabled = self.baselineEnabled
+                self.table.reloadData()
                 self.updateApplyButton()
                 self.statusLabel.stringValue = "Saved \(AppTimestamp.display(saved.updatedAt))"
                 NotificationCenter.default.post(name: .profileDidChange, object: self.profileID)
@@ -170,7 +202,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
                 self.updateApplyButton()
                 self.statusLabel.stringValue = "Save failed"
                 let alert = NSAlert()
-                alert.messageText = "Add Plugins"
+                alert.messageText = "Add-ons"
                 alert.informativeText = error.localizedDescription
                 alert.alertStyle = .warning
                 alert.runModal()
@@ -179,13 +211,13 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     }
 }
 
-/// One catalog row: icon, name + description, category pill, enable switch.
+/// One catalog row: icon, name + description, category pill, enable checkbox.
 final class PluginRowView: NSTableCellView {
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let descriptionLabel = NSTextField(labelWithString: "")
     private let pillView = NSImageView()
-    private let toggle = NSSwitch()
+    private let toggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
 
     init(reuseIdentifier: NSUserInterfaceItemIdentifier, target: AnyObject, action: Selector) {
         super.init(frame: .zero)
@@ -199,6 +231,7 @@ final class PluginRowView: NSTableCellView {
         pillView.translatesAutoresizingMaskIntoConstraints = false
         toggle.target = target
         toggle.action = action
+        toggle.setAccessibilityLabel("Enable add-on")
         toggle.translatesAutoresizingMaskIntoConstraints = false
 
         let textStack = NSStackView(views: [nameLabel, descriptionLabel])
@@ -242,5 +275,6 @@ final class PluginRowView: NSTableCellView {
         pillView.image = PluginStyle.pill(plugin.category)
         toggle.tag = row
         toggle.state = enabled ? .on : .off
+        toggle.setAccessibilityLabel("Enable \(plugin.name)")
     }
 }

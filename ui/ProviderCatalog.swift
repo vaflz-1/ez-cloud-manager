@@ -30,6 +30,19 @@ final class ProviderCatalog {
         }
     }
 
+    /// Applies the provider catalog already included in the app bootstrap
+    /// snapshot. No subprocesses are launched on the first-window path.
+    func load(from bootstrap: AppBootstrapResponse) {
+        var infos = bootstrap.providers
+        infos.sort { lhs, rhs in
+            let li = Self.providerOrder.firstIndex(of: lhs.id) ?? Int.max
+            let ri = Self.providerOrder.firstIndex(of: rhs.id) ?? Int.max
+            return li == ri ? lhs.id < rhs.id : li < ri
+        }
+        providers = infos
+        schemas = bootstrap.schemas
+    }
+
     func providerInfo(_ id: String) -> ProviderInfo? {
         providers.first { $0.id == id }
     }
