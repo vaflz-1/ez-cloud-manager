@@ -11,10 +11,13 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     private var descriptors: [PluginDescriptor] = []
     private var baselineEnabled: Set<String> = []
     private var draftEnabled: Set<String> = []
+    private var workspaceName = "this workspace"
+    private var workspaceUpdatedAt: String?
     private var table: NSTableView!
     private var statusLabel: NSTextField!
     private var applyButton: NSButton!
     private var refreshGeneration = 0
+    private var isSaving = false
 
     init(service: CredentialsService, profileID: String) {
         self.service = service
@@ -40,23 +43,31 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     private func refreshFromDisk() {
         refreshGeneration += 1
         let generation = refreshGeneration
-        statusLabel.stringValue = "Refreshing workspace state…"
+        setCatalogStatus("Refreshing workspace state…", announce: true)
         service.runAsync({ try self.service.refreshProfile(id: self.profileID) }) { [weak self] result in
             guard let self, generation == self.refreshGeneration else { return }
             switch result {
             case .success:
                 if self.draftEnabled == self.baselineEnabled {
-                    self.reload()
+                    self.reload(announce: true)
                 } else {
-                    self.statusLabel.stringValue = "Workspace refreshed · local draft preserved"
+                    self.setCatalogStatus(
+                        "Refreshed  ·  Draft preserved",
+                        accessibility: "Workspace refreshed. Local add-on draft preserved.",
+                        announce: true
+                    )
                 }
             case .failure(let error):
-                self.statusLabel.stringValue = "Refresh failed: \(error.localizedDescription)"
+                self.setCatalogStatus(
+                    "Refresh failed",
+                    accessibility: "Refresh failed: \(error.localizedDescription)",
+                    announce: true
+                )
             }
         }
     }
 
-    private func reload() {
+    private func reload(announce: Bool = false) {
         do {
             descriptors = try service.listPlugins(profileID: profileID).filter { !$0.isSystem }
             baselineEnabled = Set(descriptors.filter(\.enabled).map(\.id))
@@ -64,9 +75,16 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             table.reloadData()
             updateApplyButton()
             if let profile = try? service.getProfile(id: profileID) {
-                statusLabel.stringValue = "Last updated \(AppTimestamp.display(profile.updatedAt))"
+                workspaceName = profile.name
+                workspaceUpdatedAt = profile.updatedAt
+                showReadyStatus(announce: announce)
             } else {
-                statusLabel.stringValue = "Ready"
+                workspaceUpdatedAt = nil
+                setCatalogStatus(
+                    "This workspace",
+                    accessibility: "Changes apply to this workspace",
+                    announce: announce
+                )
             }
         } catch {
             descriptors = []
@@ -74,13 +92,17 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             draftEnabled = []
             table.reloadData()
             updateApplyButton()
-            statusLabel.stringValue = "Error: \(error.localizedDescription)"
+            setCatalogStatus(
+                "Add-ons unavailable",
+                accessibility: "Add-ons unavailable: \(error.localizedDescription)",
+                announce: announce
+            )
         }
     }
 
     private func buildWindow() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         win.title = "Add-ons"
@@ -94,7 +116,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         table.delegate = self
         table.dataSource = self
         table.backgroundColor = .clear
-        table.rowHeight = 56
+        table.rowHeight = 60
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("plugin")))
 
         let scroll = NSScrollView()
@@ -117,7 +139,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(cancelButton)
 
-        applyButton = NSButton(title: "Apply", target: self, action: #selector(applyChanges))
+        applyButton = NSButton(title: "Save Changes", target: self, action: #selector(applyChanges))
         applyButton.bezelStyle = .rounded
         applyButton.keyEquivalent = "\r"
         applyButton.translatesAutoresizingMaskIntoConstraints = false
@@ -154,11 +176,20 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         let id = NSUserInterfaceItemIdentifier("pluginRow")
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? PluginRowView)
             ?? PluginRowView(reuseIdentifier: id, target: self, action: #selector(toggled(_:)))
-        cell.configure(descriptors[row], row: row, enabled: draftEnabled.contains(descriptors[row].id))
+        cell.configure(
+            descriptors[row],
+            row: row,
+            enabled: draftEnabled.contains(descriptors[row].id),
+            interactive: !isSaving
+        )
         return cell
     }
 
     @objc private func toggled(_ sender: NSButton) {
+        guard !isSaving else {
+            table.reloadData()
+            return
+        }
         let row = sender.tag
         guard row >= 0, row < descriptors.count else { return }
         let plugin = descriptors[row]
@@ -168,12 +199,57 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
             draftEnabled.remove(plugin.id)
         }
         updateApplyButton()
-        statusLabel.stringValue = "Unsaved add-on changes"
+        if draftEnabled == baselineEnabled {
+            showReadyStatus()
+        } else {
+            setCatalogStatus(
+                "Unsaved changes  ·  “\(workspaceName)”",
+                accessibility: "Unsaved add-on changes for workspace \(workspaceName)"
+            )
+        }
     }
 
     private func updateApplyButton() {
-        applyButton?.isEnabled = draftEnabled != baselineEnabled
+        applyButton?.isEnabled = !isSaving && draftEnabled != baselineEnabled
         window?.isDocumentEdited = draftEnabled != baselineEnabled
+    }
+
+    private func showReadyStatus(announce: Bool = false) {
+        if let workspaceUpdatedAt {
+            let updated = AppTimestamp.display(workspaceUpdatedAt)
+            setCatalogStatus(
+                "Updated \(updated)  ·  “\(workspaceName)”",
+                accessibility: "Changes apply to workspace \(workspaceName). Last updated \(updated).",
+                announce: announce
+            )
+        } else {
+            setCatalogStatus(
+                "“\(workspaceName)”",
+                accessibility: "Changes apply to workspace \(workspaceName)",
+                announce: announce
+            )
+        }
+    }
+
+    private func setCatalogStatus(
+        _ visual: String,
+        accessibility: String? = nil,
+        announce: Bool = false
+    ) {
+        let full = accessibility ?? visual
+        statusLabel.stringValue = visual
+        statusLabel.toolTip = full
+        statusLabel.setAccessibilityLabel(full)
+        if announce, window?.isVisible == true {
+            NSAccessibility.post(
+                element: statusLabel as Any,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: full,
+                    .priority: NSAccessibilityPriorityLevel.medium.rawValue
+                ]
+            )
+        }
     }
 
     @objc private func applyChanges() {
@@ -181,12 +257,15 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         guard !changedIDs.isEmpty else { return }
         let submitted = draftEnabled
         let changes = Dictionary(uniqueKeysWithValues: changedIDs.map { ($0, submitted.contains($0)) })
-        applyButton.isEnabled = false
-        statusLabel.stringValue = "Saving…"
+        isSaving = true
+        updateApplyButton()
+        table.reloadData()
+        setCatalogStatus("Saving…", announce: true)
         service.runAsync({ try self.service.updatePlugins(profileID: self.profileID, changes: changes) }) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let saved):
+                self.isSaving = false
                 // The targeted core preserves unrelated concurrent add-on
                 // changes. Recompose from the canonical saved Profile instead
                 // of assuming our submitted draft is the entire enabled set.
@@ -196,11 +275,18 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
                 self.draftEnabled = self.baselineEnabled
                 self.table.reloadData()
                 self.updateApplyButton()
-                self.statusLabel.stringValue = "Saved \(AppTimestamp.display(saved.updatedAt))"
+                self.workspaceUpdatedAt = saved.updatedAt
+                self.showReadyStatus(announce: true)
                 NotificationCenter.default.post(name: .profileDidChange, object: self.profileID)
             case .failure(let error):
+                self.isSaving = false
                 self.updateApplyButton()
-                self.statusLabel.stringValue = "Save failed"
+                self.table.reloadData()
+                self.setCatalogStatus(
+                    "Save failed",
+                    accessibility: "Save failed: \(error.localizedDescription)",
+                    announce: true
+                )
                 let alert = NSAlert()
                 alert.messageText = "Add-ons"
                 alert.informativeText = error.localizedDescription
@@ -211,12 +297,14 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     }
 }
 
-/// One catalog row: icon, name + description, category pill, enable checkbox.
+/// One catalog row: neutral add-on symbol, purpose, connector requirement and
+/// an explicit draft checkbox. Marketplace categories stay out of the main
+/// hierarchy until they carry a real filtering or policy meaning.
 final class PluginRowView: NSTableCellView {
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let descriptionLabel = NSTextField(labelWithString: "")
-    private let pillView = NSImageView()
+    private let connectorsLabel = NSTextField(labelWithString: "")
     private let toggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
 
     init(reuseIdentifier: NSUserInterfaceItemIdentifier, target: AnyObject, action: Selector) {
@@ -224,17 +312,20 @@ final class PluginRowView: NSTableCellView {
         identifier = reuseIdentifier
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.setAccessibilityElement(false)
         nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         descriptionLabel.font = .systemFont(ofSize: 11)
         descriptionLabel.textColor = .secondaryLabelColor
         descriptionLabel.lineBreakMode = .byTruncatingTail
-        pillView.translatesAutoresizingMaskIntoConstraints = false
+        connectorsLabel.font = UI.captionFont
+        connectorsLabel.textColor = .tertiaryLabelColor
+        connectorsLabel.lineBreakMode = .byTruncatingTail
         toggle.target = target
         toggle.action = action
         toggle.setAccessibilityLabel("Enable add-on")
         toggle.translatesAutoresizingMaskIntoConstraints = false
 
-        let textStack = NSStackView(views: [nameLabel, descriptionLabel])
+        let textStack = NSStackView(views: [nameLabel, descriptionLabel, connectorsLabel])
         textStack.orientation = .vertical
         textStack.alignment = .leading
         textStack.spacing = 2
@@ -242,7 +333,6 @@ final class PluginRowView: NSTableCellView {
 
         addSubview(iconView)
         addSubview(textStack)
-        addSubview(pillView)
         addSubview(toggle)
 
         NSLayoutConstraint.activate([
@@ -253,10 +343,7 @@ final class PluginRowView: NSTableCellView {
 
             textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: pillView.leadingAnchor, constant: -10),
-
-            pillView.trailingAnchor.constraint(equalTo: toggle.leadingAnchor, constant: -12),
-            pillView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -12),
 
             toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             toggle.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -265,16 +352,21 @@ final class PluginRowView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(_ plugin: PluginDescriptor, row: Int, enabled: Bool) {
+    func configure(_ plugin: PluginDescriptor, row: Int, enabled: Bool, interactive: Bool) {
         let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-        iconView.image = NSImage(systemSymbolName: plugin.icon, accessibilityDescription: plugin.name)?
+        iconView.image = NSImage(systemSymbolName: plugin.icon, accessibilityDescription: nil)?
             .withSymbolConfiguration(cfg)
-        iconView.contentTintColor = PluginStyle.color(plugin.category)
+        iconView.contentTintColor = .secondaryLabelColor
         nameLabel.stringValue = plugin.name
         descriptionLabel.stringValue = plugin.description
-        pillView.image = PluginStyle.pill(plugin.category)
+        if plugin.clouds.isEmpty {
+            connectorsLabel.stringValue = "No connection required"
+        } else {
+            connectorsLabel.stringValue = "Requires \(plugin.clouds.map { $0.uppercased() }.joined(separator: " · "))"
+        }
         toggle.tag = row
         toggle.state = enabled ? .on : .off
+        toggle.isEnabled = interactive
         toggle.setAccessibilityLabel("Enable \(plugin.name)")
     }
 }

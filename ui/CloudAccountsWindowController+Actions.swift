@@ -78,7 +78,7 @@ extension CloudAccountsWindowController {
         let path = pathsByProvider[provider] ?? "the provider's store"
         let alert = NSAlert()
         alert.messageText = "Delete \(catalog.providerDisplayName(provider)) connection?"
-        alert.informativeText = "Account \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
+        alert.informativeText = "Connection \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {

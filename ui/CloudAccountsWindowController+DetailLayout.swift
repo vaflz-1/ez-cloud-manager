@@ -8,12 +8,12 @@ extension CloudAccountsWindowController {
         let view = NSView()
         view.translatesAutoresizingMaskIntoConstraints = false
 
-        // ── Card 1 · Account name + provider + connectivity ─────────────────
+        // ── Card 1 · Connection name + connector + connectivity ─────────────
         let profileCard = makeCard()
         view.addSubview(profileCard)
         let c1 = profileCard.contentView!
 
-        let nameLabel = sectionCaption("ACCOUNT")
+        let nameLabel = sectionCaption("CONNECTION")
         c1.addSubview(nameLabel)
 
         providerPopup = NSPopUpButton()
@@ -24,14 +24,14 @@ extension CloudAccountsWindowController {
         providerPopup.translatesAutoresizingMaskIntoConstraints = false
         c1.addSubview(providerPopup)
 
-        profileModeLabel = NSTextField(labelWithString: "New account")
+        profileModeLabel = NSTextField(labelWithString: "New connection")
         profileModeLabel.font = .systemFont(ofSize: 11, weight: .medium)
         profileModeLabel.textColor = .secondaryLabelColor
         profileModeLabel.translatesAutoresizingMaskIntoConstraints = false
         c1.addSubview(profileModeLabel)
 
         profileNameField = NSTextField()
-        profileNameField.placeholderString = "example-account"
+        profileNameField.placeholderString = "example-connection"
         profileNameField.controlSize = .large
         profileNameField.delegate = self
         profileNameField.translatesAutoresizingMaskIntoConstraints = false
@@ -49,7 +49,7 @@ extension CloudAccountsWindowController {
         testConnectionButton.controlSize = .small
         testConnectionButton.font = .systemFont(ofSize: 11)
         testConnectionButton.isEnabled = false
-        testConnectionButton.toolTip = "Select a saved account to test its credentials"
+        testConnectionButton.toolTip = "Select a saved connection to test its credentials"
 
         testConnectionSpinner = NSProgressIndicator()
         testConnectionSpinner.style = .spinning
@@ -139,7 +139,7 @@ extension CloudAccountsWindowController {
         variablesTitleLabel = sectionCaption("VARIABLES")
         c3.addSubview(variablesTitleLabel)
 
-        variablesSummaryLabel = NSTextField(labelWithString: "No account variables loaded")
+        variablesSummaryLabel = NSTextField(labelWithString: "No connection variables loaded")
         variablesSummaryLabel.font = .systemFont(ofSize: 11, weight: .regular)
         variablesSummaryLabel.textColor = .tertiaryLabelColor
         variablesSummaryLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -233,7 +233,7 @@ extension CloudAccountsWindowController {
         activateButton.isHidden = true
         activateButton.translatesAutoresizingMaskIntoConstraints = false
 
-        saveButton = NSButton(title: "Save Account", target: self, action: #selector(saveProfile))
+        saveButton = NSButton(title: "Save Connection", target: self, action: #selector(saveProfile))
         saveButton.bezelStyle = .push
         saveButton.controlSize = .large
         saveButton.keyEquivalent = "\r"

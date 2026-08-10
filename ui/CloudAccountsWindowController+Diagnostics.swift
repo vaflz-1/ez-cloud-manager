@@ -57,7 +57,7 @@ extension CloudAccountsWindowController {
 
     @objc func testConnection() {
         guard let name = selectedProfileName else {
-            showError("Select an account first.")
+            showError("Select a connection first.")
             return
         }
         let provider = selectedProvider

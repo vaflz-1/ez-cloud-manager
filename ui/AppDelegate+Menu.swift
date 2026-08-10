@@ -17,9 +17,7 @@ extension AppDelegate {
         appMenu.addItem(.separator())
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         let appearanceMenu = NSMenu(title: "Appearance")
-        let selectedAppearance = AppAppearance(
-            rawValue: UserDefaults.standard.integer(forKey: "KervikAppearance")
-        ) ?? .system
+        let selectedAppearance = Product.savedAppearance()
         for choice in AppAppearance.allCases {
             let item = NSMenuItem(title: choice.title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
             item.target = self
@@ -82,11 +80,8 @@ extension AppDelegate {
         mainMenu.addItem(helpMenuItem)
         let helpMenu = NSMenu(title: "Help")
         helpMenuItem.submenu = helpMenu
-        // Fixed target now (was `nil`/responder-chain routed to whichever
-        // ProfileWindowController was key) — with 4+ window classes in play
-        // post-P1, that trick got fragile. Every Hub keeps its own toolbar
-        // Ko-fi button as a small, deliberate duplicate (see AppDelegate's
-        // openKoFi doc comment).
+        // Fixed target avoids responder-chain ambiguity across the app's
+        // independent Hub and Add-on windows.
         let koFiItem = NSMenuItem(title: "Support \(Product.name) on Ko-fi", action: #selector(openKoFi), keyEquivalent: "")
         koFiItem.target = self
         helpMenu.addItem(koFiItem)

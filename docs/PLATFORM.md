@@ -229,7 +229,10 @@ transactions. Reads remain lock-free over atomically replaced files.
 ## Performance model
 
 The Go core is not the measured bottleneck. Local commands take roughly
-2–3 ms; a Swift Foundation Process boundary costs roughly 75–80 ms. Therefore:
+2–3 ms. The former Swift Foundation Process bridge cost roughly 65–80 ms;
+the current `posix_spawn` bridge runs a warm real bootstrap at roughly 3 ms
+while preserving one isolated process and request-scoped environment per
+call. Therefore:
 
 - `app bootstrap` returns migration, providers, schemas, Workspaces, selected
   Workspace and initial Add-on state in one versioned snapshot;

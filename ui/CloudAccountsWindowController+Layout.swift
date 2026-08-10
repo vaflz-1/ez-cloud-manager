@@ -155,8 +155,8 @@ extension CloudAccountsWindowController {
 
         addRemoveControl = NSSegmentedControl(
             images: [
-                NSImage(systemSymbolName: "plus", accessibilityDescription: "Add account")!,
-                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete account")!
+                NSImage(systemSymbolName: "plus", accessibilityDescription: "Add connection")!,
+                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete connection")!
             ],
             trackingMode: .momentary,
             target: self,

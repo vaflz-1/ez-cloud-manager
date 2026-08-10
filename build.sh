@@ -27,6 +27,7 @@ LEGACY_CLI_LINK="$USER_HOME/.local/bin/awspm"
 INSTALLED_CLI_PATH="$APP_PATH/Contents/Resources/ezcloud"
 ICON_BASENAME="EZCloudManagerAppIcon"
 ICON_FILE="$PROJECT_DIR/assets/$ICON_BASENAME.icns"
+SWIFT_TARGET="${EZCLOUD_SWIFT_TARGET:-$(uname -m)-apple-macosx13.0}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 pkill -x EZCloudManager 2>/dev/null || true
@@ -43,12 +44,12 @@ swift "$PROJECT_DIR/tools/generate-icon.swift"
 
 if [ "${EZCLOUD_BUILD_MODE:-release}" = "debug" ]; then
   go build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
-  swiftc "$PROJECT_DIR"/ui/*.swift \
+  swiftc -target "$SWIFT_TARGET" "$PROJECT_DIR"/ui/*.swift \
     -o "$BUILD_APP/Contents/MacOS/EZCloudManager" \
     -framework AppKit
 else
   go build -trimpath -ldflags="-s -w" -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
-  swiftc -O -whole-module-optimization "$PROJECT_DIR"/ui/*.swift \
+  swiftc -target "$SWIFT_TARGET" -O -whole-module-optimization "$PROJECT_DIR"/ui/*.swift \
     -o "$BUILD_APP/Contents/MacOS/EZCloudManager" \
     -framework AppKit
 fi

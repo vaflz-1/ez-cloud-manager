@@ -1,7 +1,6 @@
 import AppKit
 
-/// Plugin list loading, grid data source, and opening each plugin in its own
-/// window — the Hub's entire behavior (docs/PLATFORM.md phase P1).
+/// Add-on list loading, grid data source and activation for one Workspace.
 extension ProfileWindowController {
     /// Tears down every window whose state is bound to this Hub's current
     /// profile. A rebind must create fresh controllers so no plugin can keep
@@ -59,6 +58,7 @@ extension ProfileWindowController {
     func refreshHub() {
         do {
             enabledPlugins = try service.listPlugins(profileID: profile.id).filter { $0.enabled && !$0.isSystem }
+            hubSnapshotProfileID = profile.id
             renderHub()
         } catch {
             showHubError(error.localizedDescription)
@@ -66,12 +66,20 @@ extension ProfileWindowController {
     }
 
     func renderHub() {
+        browseAddonsButton.title = "Browse Add-ons…"
+        browseAddonsButton.target = self
+        browseAddonsButton.action = #selector(openCatalog)
+        workspaceMetaLabel.textColor = .secondaryLabelColor
+        workspaceMetaLabel.toolTip = nil
         if enabledPlugins.isEmpty {
             configureEmptyStateForOnboarding()
         }
+        updateWorkspaceHeader()
+        browseAddonsButton.isHidden = enabledPlugins.isEmpty
         emptyStateView.isHidden = !enabledPlugins.isEmpty
-        gridScrollView.isHidden = enabledPlugins.isEmpty
-        collectionView.reloadData()
+        gridHostView.isHidden = enabledPlugins.isEmpty
+        if !enabledPlugins.isEmpty { ensureGridBuilt() }
+        collectionView?.reloadData()
     }
 
     @objc func retryHub() {
@@ -79,30 +87,41 @@ extension ProfileWindowController {
     }
 
     private func showHubError(_ message: String) {
-        enabledPlugins = []
-        emptyStateView.isHidden = false
-        gridScrollView.isHidden = true
-        collectionView.reloadData()
-        configureEmptyStateForError(message)
+        guard hubSnapshotProfileID == profile.id else {
+            enabledPlugins = []
+            renderHub()
+            configureEmptyStateForError(message)
+            browseAddonsButton.isHidden = true
+            return
+        }
+
+        // A failed refresh must not erase the last good add-on snapshot. Keep
+        // the current grid/empty state usable and turn the nearest action into
+        // an explicit retry until a fresh snapshot arrives.
+        renderHub()
+        if enabledPlugins.isEmpty {
+            configureEmptyStateForError(message)
+        } else {
+            workspaceMetaLabel.stringValue += "  ·  Refresh failed"
+            workspaceMetaLabel.toolTip = message
+            browseAddonsButton.title = "Try Again"
+            browseAddonsButton.target = self
+            browseAddonsButton.action = #selector(retryHub)
+            browseAddonsButton.isHidden = false
+        }
     }
 
     // MARK: - NSCollectionViewDataSource
 
     func numberOfSections(in collectionView: NSCollectionView) -> Int { 1 }
 
-    /// One item per enabled plugin, plus a permanent trailing "Add Plugins"
-    /// tile (see AddPluginTileItem) — the grid is never JUST plugin cards
-    /// once it's showing at all.
+    /// One item per enabled add-on. Discovery is a stable header action, not
+    /// a fake catalog card mixed into the user's installed tools.
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
-        enabledPlugins.count + 1
+        enabledPlugins.count
     }
 
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
-        if indexPath.item == enabledPlugins.count {
-            let item = collectionView.makeItem(withIdentifier: AddPluginTileItem.reuseIdentifier, for: indexPath)
-            (item as? AddPluginTileItem)?.onPress = { [weak self] in self?.openCatalog() }
-            return item
-        }
         let item = collectionView.makeItem(withIdentifier: PluginCardItem.reuseIdentifier, for: indexPath)
         if let card = item as? PluginCardItem, indexPath.item < enabledPlugins.count {
             let plugin = enabledPlugins[indexPath.item]
@@ -115,16 +134,12 @@ extension ProfileWindowController {
     // MARK: - NSCollectionViewDelegate
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
-        defer { collectionView.deselectItems(at: indexPaths) }
-        guard let idx = indexPaths.first?.item else { return }
-        activateHubItem(at: idx)
+        // Selection is navigation, not activation. Mouse-up and Return/Space
+        // activate through HubCollectionView so keyboard arrows never launch
+        // an add-on merely by moving focus.
     }
 
     func activateHubItem(at idx: Int) {
-        if idx == enabledPlugins.count {
-            openCatalog()
-            return
-        }
         guard idx < enabledPlugins.count else { return }
         openPlugin(id: enabledPlugins[idx].id)
     }
@@ -179,11 +194,4 @@ extension ProfileWindowController {
         reloadProfileBar(selecting: profile.id)
     }
 
-    /// The Hub's own Ko-fi toolbar button — a small, deliberate duplicate of
-    /// AppDelegate's Help-menu action rather than new cross-controller
-    /// plumbing (this codebase already duplicates one-liners like showError
-    /// per-controller on purpose).
-    @objc func openKoFi() {
-        NSWorkspace.shared.open(AppDelegate.koFiURL)
-    }
 }

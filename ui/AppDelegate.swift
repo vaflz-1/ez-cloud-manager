@@ -24,7 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceRefreshGeneration = 0
 
     static let koFiURL = URL(string: "https://ko-fi.com/vaflz")!
-    private static let appearanceDefaultsKey = "KervikAppearance"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -197,26 +196,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fans the resulting immutable snapshot out in memory. Repeated requests
     /// are generation-gated so an older completion can never roll state back.
     @objc func refreshWorkspaceState(_ sender: Any?) {
+        startWorkspaceRefresh(retryIfSuperseded: true)
+    }
+
+    private func startWorkspaceRefresh(retryIfSuperseded: Bool) {
         workspaceRefreshGeneration += 1
         let generation = workspaceRefreshGeneration
-        service.runAsync({ try self.service.readProfilesFromDisk() }) { [weak self] result in
+        service.runAsync({
+            let revision = self.service.beginCompleteProfileRead()
+            return (revision, try self.service.readProfilesFromDisk())
+        }) { [weak self] result in
             guard let self, generation == self.workspaceRefreshGeneration else { return }
             switch result {
-            case .success(let profiles):
+            case .success(let (revision, profiles)):
+                guard self.service.isCompleteProfileReadCurrent(revision) else {
+                    if retryIfSuperseded {
+                        self.startWorkspaceRefresh(retryIfSuperseded: false)
+                    }
+                    return
+                }
                 let byID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
                 for (id, controller) in self.windowControllers {
                     if !controller.canApplyRefreshedSnapshot(byID[id]) {
                         return // keep the prior coherent snapshot and the local draft
                     }
                 }
-                self.service.storeCompleteProfiles(profiles)
+                guard let accepted = self.service.commitCompleteProfiles(
+                    profiles,
+                    ifUnchangedSince: revision
+                ) else {
+                    // A mutation completed during a draft-confirmation modal.
+                    // The authorization was side-effect-free, so keep the
+                    // draft protected and let that mutation's completion own
+                    // the next UI state instead of prompting a second time.
+                    return
+                }
+                let acceptedByID = Dictionary(uniqueKeysWithValues: accepted.map { ($0.id, $0) })
                 for (id, controller) in Array(self.windowControllers) {
-                    guard let updated = byID[id] else {
+                    guard let updated = acceptedByID[id] else {
                         self.windowControllers.removeValue(forKey: id)
                         controller.closeAfterProfileDeletion()
                         continue
                     }
-                    controller.applyRefreshedSnapshot(updated, allProfiles: profiles)
+                    controller.applyRefreshedSnapshot(updated, allProfiles: accepted)
                 }
                 self.profileManagerController?.applyRefreshedSnapshot()
             case .failure(let error):
@@ -225,23 +247,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The Help menu's fixed target (see AppDelegate+Menu.swift) — a small,
-    /// deliberate duplicate of every Hub's own toolbar Ko-fi button rather
-    /// than new cross-controller plumbing (this codebase already duplicates
-    /// one-liners like showError per-controller on purpose).
+    /// Fixed target for the single Support action in the Help menu.
     @objc func openKoFi() {
         NSWorkspace.shared.open(Self.koFiURL)
     }
 
     func applySavedAppearance() {
-        let raw = UserDefaults.standard.integer(forKey: Self.appearanceDefaultsKey)
-        let choice = AppAppearance(rawValue: raw) ?? .system
-        NSApp.appearance = choice.appearance
+        NSApp.appearance = Product.savedAppearance().appearance
     }
 
     @objc func chooseAppearance(_ sender: NSMenuItem) {
         guard let choice = AppAppearance(rawValue: sender.tag) else { return }
-        UserDefaults.standard.set(choice.rawValue, forKey: Self.appearanceDefaultsKey)
+        UserDefaults.standard.set(choice.rawValue, forKey: Product.appearancePreferenceKey)
         NSApp.appearance = choice.appearance
         sender.menu?.items.forEach { $0.state = $0.tag == choice.rawValue ? .on : .off }
     }

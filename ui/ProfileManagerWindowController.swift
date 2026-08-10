@@ -322,7 +322,7 @@ final class ProfileManagerWindowController: NSWindowController, NSTableViewDataS
         let icon = NSImageView()
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         icon.image = NSImage(systemSymbolName: p.icon, accessibilityDescription: p.name)?.withSymbolConfiguration(cfg)
-        icon.contentTintColor = PluginStyle.color(p.category)
+        icon.contentTintColor = .secondaryLabelColor
         let label = NSTextField(labelWithString: p.name)
         label.font = .systemFont(ofSize: 11)
         let chip = NSStackView(views: [icon, label])

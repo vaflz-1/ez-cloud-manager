@@ -27,9 +27,24 @@ extension CloudAccountsWindowController {
             || unparsedPaste
     }
 
+    /// Side-effect-free authorization used before an external Workspace
+    /// snapshot is conditionally committed. If that commit is superseded, the
+    /// editor must remain dirty and continue protecting its draft.
+    func authorizeDiscardConnectionChanges() -> Bool {
+        connectionDiscardAuthorization().allowed
+    }
+
     func confirmDiscardConnectionChanges() -> Bool {
+        let authorization = connectionDiscardAuthorization()
+        guard authorization.allowed else { return false }
+        guard authorization.shouldDiscard else { return true }
+        markConnectionDraftDiscarded()
+        return true
+    }
+
+    private func connectionDiscardAuthorization() -> (allowed: Bool, shouldDiscard: Bool) {
         commitActiveEdits()
-        guard hasUnsavedConnectionChanges() else { return true }
+        guard hasUnsavedConnectionChanges() else { return (true, false) }
         let target = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let alert = NSAlert()
         alert.messageText = "Discard unsaved connection changes?"
@@ -38,14 +53,18 @@ extension CloudAccountsWindowController {
             : "Changes to \(target) have not been saved."
         alert.addButton(withTitle: "Keep Editing")
         alert.addButton(withTitle: "Discard Changes")
-        guard alert.runModal() == .alertSecondButtonReturn else { return false }
+        let discard = alert.runModal() == .alertSecondButtonReturn
+        return (discard, discard)
+    }
+
+    private func markConnectionDraftDiscarded() {
+        let target = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         setEditorBaseline(
             provider: currentEditingProvider(),
             name: target,
             fields: fieldsDictionary()
         )
         lastAutoParsedPaste = pasteView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        return true
     }
 
     /// Provider that owns the profile being edited: the selected profile's
@@ -442,7 +461,7 @@ extension CloudAccountsWindowController {
     func updateTestConnectionButton() {
         let enabled = selectedProfileName != nil
         testConnectionButton?.isEnabled = enabled
-        testConnectionButton?.toolTip = enabled ? nil : "Select a saved account to test its credentials"
+        testConnectionButton?.toolTip = enabled ? nil : "Select a saved connection to test its credentials"
     }
 
     func updateVariablesSummary() {

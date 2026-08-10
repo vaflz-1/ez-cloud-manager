@@ -32,6 +32,10 @@ mutation has a visible result and audit trail.
 Machine contracts remain compatible while Kervik is a working name:
 `ezcloud`, `.ezprofile`, `EZCLOUD_*`, the bundle identifier and the existing
 Application Support directory do not move without an explicit data migration.
+The display name is provisional too. A public repository, bundle identifier or
+package-engine rename happens only after one candidate survives namespace,
+software-market and trademark screening; naming pressure is not a migration
+plan.
 
 ## Visual language
 
@@ -56,13 +60,17 @@ independent symbol, not a cloud, gear, terminal, letter or provider logo.
 
 ## Performance contract
 
-The measured Go core completes local reads in roughly 2–3 ms. The expensive
-boundary is spawning it through Foundation Process (roughly 75–80 ms per call),
-not the implementation language.
+The measured Go core completes local reads in roughly 2–3 ms. The original
+Foundation Process bridge added roughly 65–80 ms per call; the production
+`posix_spawn` bridge keeps isolated request processes while bringing a warm
+versioned bootstrap to roughly 3 ms. The implementation language is not the
+bottleneck.
 
 - First window target: 250 ms on a warm filesystem cache.
 - Startup: one versioned bootstrap process, not a chain of local subprocesses.
 - Connections refresh: one batched snapshot with per-connector errors.
+- IPC: absolute executable path, exact argv, request-scoped env, three explicit
+  pipe endpoints and no shell or ambient descriptor inheritance.
 - Release binaries: optimized and stripped; debug builds remain available.
 - A persistent core is a later step, after request-scoped execution context and
   cancellation are designed. Rust is reserved for a measured CPU-bound leaf,

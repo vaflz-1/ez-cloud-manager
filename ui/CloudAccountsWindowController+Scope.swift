@@ -11,7 +11,7 @@ extension CloudAccountsWindowController {
     @objc func openScopeSheet() {
         let current = profile.cloudAccountsSettings
 
-        let showAllCheckbox = NSButton(checkboxWithTitle: "Show all accounts (ignore the list below)", target: nil, action: nil)
+        let showAllCheckbox = NSButton(checkboxWithTitle: "Allow all discovered connections", target: nil, action: nil)
         showAllCheckbox.state = current.showAllAccounts ? .on : .off
         showAllCheckbox.translatesAutoresizingMaskIntoConstraints = false
 
@@ -72,7 +72,7 @@ extension CloudAccountsWindowController {
             // going stale — same convention every other whole-profile-facing
             // save already uses.
             NotificationCenter.default.post(name: .profileDidChange, object: profile.id)
-            setStatus("Updated account scope")
+            setStatus("Updated connection scope")
         } catch {
             showError(error.localizedDescription)
         }

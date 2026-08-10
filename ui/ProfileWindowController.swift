@@ -1,21 +1,17 @@
 import AppKit
 import Foundation
 
-/// ProfileWindowController is the **Plugin Hub** — the window one app window
-/// binds to (docs/PLATFORM.md phase P0's one-window-one-profile model is
-/// unchanged; only its CONTENT changes here, P1). It shows this profile's
-/// enabled plugins as cards in a grid (or an empty-skeleton state if none are
-/// enabled yet) and opens each plugin in its own separate window — it never
-/// hosts plugin UI directly. Everything the pre-P1 credentials browser did
-/// now lives in CloudAccountsWindowController, one of three built-in plugins
-/// this profile can enable (see internal/plugin.Builtins):
-///   - CloudAccountsWindowController  — the credentials browser (moved verbatim)
-///   - LaunchTemplatesWindowController — EC2 Launch Templates (unchanged class, new entry point)
-///   - TransferWindowController        — whole-profile .ezprofile export/import (new)
+/// ProfileWindowController is the Workspace-bound **Add-on Hub**. It renders
+/// enabled workflow packages as cards and opens each in its own window; trusted
+/// Connections remain a permanent Platform surface in the toolbar.
+/// Current compiled entrypoints are:
+///   - CloudAccountsWindowController   — Platform Connections administration
+///   - LaunchTemplatesWindowController — AWS-dependent Add-on
+///   - TransferWindowController        — privileged Workspace transfer Add-on
 ///
 /// Behavior is split across focused extensions:
 ///   - ProfileWindowController+Layout — window / toolbar / empty-state / grid building
-///   - ProfileWindowController+Hub    — plugin list loading, grid data source, opening plugins
+///   - ProfileWindowController+Hub    — Add-on list loading, grid data source and activation
 ///
 /// Terminology note: `self.profile: Profile` is the global container this
 /// window is bound to (docs/PLATFORM.md's profile engine) — unrelated to the
@@ -42,19 +38,22 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     var transferController: TransferWindowController?
     var catalogController: PluginCatalogWindowController?
 
-    var collectionView: NSCollectionView!
+    var collectionView: NSCollectionView?
     var emptyStateView: NSView!
     var emptyStateTitleLabel: NSTextField!
     var emptyStateSubtitleLabel: NSTextField!
     var emptyStateButton: NSButton!
-    var gridScrollView: NSScrollView!
+    var gridHostView: NSView!
+    var gridScrollView: NSScrollView?
     var workspaceTitleLabel: NSTextField!
     var workspaceMetaLabel: NSTextField!
+    var browseAddonsButton: NSButton!
     /// This profile's enabled plugins, as rendered in the grid.
     var enabledPlugins: [PluginDescriptor] = []
     /// Bootstrap supplies the first menu and Hub payload in the same IPC.
     /// After that first paint, ordinary refresh paths remain authoritative.
     var preloadedProfiles: [Profile]?
+    var hubSnapshotProfileID: String?
     private var hasRenderedPreloadedHub = false
 
     // MARK: Profile switcher toolbar item (ProfileWindowController+ProfileBar.swift)
@@ -75,6 +74,7 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
         self.service = service
         self.preloadedProfiles = preloadedProfiles
         self.enabledPlugins = preloadedAddons?.filter { $0.enabled && !$0.isSystem } ?? []
+        self.hubSnapshotProfileID = preloadedAddons == nil ? nil : profile.id
         self.hasRenderedPreloadedHub = preloadedAddons != nil
         super.init(window: nil)
         buildWindow()
@@ -124,7 +124,7 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func canApplyRefreshedSnapshot(_ updated: Profile?) -> Bool {
         guard updated == nil || updated?.envVars != profile.envVars else { return true }
-        return authorizeProfileContextExit()
+        return cloudAccountsController?.authorizeDiscardConnectionChanges() ?? true
     }
 
     /// The Profile Manager saved a change to this window's profile (name,
@@ -176,6 +176,8 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate, NSToo
     func rebind(to newProfile: Profile) -> Bool {
         guard authorizeProfileContextExit() else { return false }
         closeProfileBoundControllers()
+        enabledPlugins = []
+        hubSnapshotProfileID = nil
         profile = newProfile
         window?.title = Product.workspaceTitle(newProfile.name)
         updateWorkspaceHeader()

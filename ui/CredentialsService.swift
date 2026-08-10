@@ -1,32 +1,5 @@
 import Foundation
 
-private final class PipeDrain: @unchecked Sendable {
-    private let handle: FileHandle
-    private let lock = NSLock()
-    private var stored = Data()
-
-    init(_ handle: FileHandle) {
-        self.handle = handle
-    }
-
-    func start(in group: DispatchGroup) {
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let value = handle.readDataToEndOfFile()
-            lock.lock()
-            stored = value
-            lock.unlock()
-            group.leave()
-        }
-    }
-
-    func data() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return stored
-    }
-}
-
 /// CredentialsService is the single boundary between the UI and the `ezcloud`
 /// CLI. All subprocess spawning, stdin/stdout piping, and JSON decoding lives
 /// here, so the rest of the app deals only in typed models.
@@ -54,6 +27,7 @@ final class CredentialsService {
     private var profilesByID: [String: Profile] = [:]
     private var hasCompleteProfileSnapshot = false
     private var addonCatalogSnapshot: [PluginDescriptor]?
+    private var profileSnapshotRevision: UInt64 = 0
 
     init() {
         if let resource = Bundle.main.path(forResource: "ezcloud", ofType: nil) {
@@ -87,6 +61,7 @@ final class CredentialsService {
                 enabled: false
             )
         }
+        profileSnapshotRevision &+= 1
         snapshotLock.unlock()
     }
 
@@ -105,11 +80,37 @@ final class CredentialsService {
         return profilesByID[id]
     }
 
-    func storeCompleteProfiles(_ profiles: [Profile]) {
+    /// Captures the in-memory Workspace revision immediately before a fresh
+    /// disk read. A later commit is accepted only if no mutation updated the
+    /// shared snapshot while that I/O was in flight.
+    func beginCompleteProfileRead() -> UInt64 {
         snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return profileSnapshotRevision
+    }
+
+    func isCompleteProfileReadCurrent(_ revision: UInt64) -> Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return profileSnapshotRevision == revision
+    }
+
+    /// Atomically commits a complete disk snapshot if it is still based on the
+    /// current in-memory revision. Returning the accepted, sorted snapshot is
+    /// important: callers must render this value, never the unguarded raw read.
+    func commitCompleteProfiles(
+        _ profiles: [Profile],
+        ifUnchangedSince expectedRevision: UInt64
+    ) -> [Profile]? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        guard profileSnapshotRevision == expectedRevision else { return nil }
         profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
         hasCompleteProfileSnapshot = true
-        snapshotLock.unlock()
+        profileSnapshotRevision &+= 1
+        return profilesByID.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
     }
 
     func storeProfile(_ profile: Profile) {
@@ -122,12 +123,15 @@ final class CredentialsService {
             return
         }
         profilesByID[profile.id] = profile
+        profileSnapshotRevision &+= 1
         snapshotLock.unlock()
     }
 
     func removeCachedProfile(id: String) {
         snapshotLock.lock()
-        profilesByID.removeValue(forKey: id)
+        if profilesByID.removeValue(forKey: id) != nil {
+            profileSnapshotRevision &+= 1
+        }
         snapshotLock.unlock()
     }
 
@@ -169,6 +173,7 @@ final class CredentialsService {
         if var profile = profilesByID[profileID] {
             profile.enabledPlugins = descriptors.filter(\.enabled).map(\.id)
             profilesByID[profileID] = profile
+            profileSnapshotRevision &+= 1
         }
         snapshotLock.unlock()
     }
@@ -243,45 +248,32 @@ final class CredentialsService {
     }
 
     func run(_ args: [String], inputData: Data?, extraEnv: [String: String] = [:]) throws -> Data {
-        let process = Process()
-        let output = Pipe()
-        let errorPipe = Pipe()
-        let input = Pipe()
-        process.executableURL = URL(fileURLWithPath: toolPath)
-        process.arguments = args
-        process.standardOutput = output
-        process.standardError = errorPipe
-        process.standardInput = input
-        process.environment = Self.childEnvironment(extraEnv: extraEnv)
-
-        try process.run()
-        let drains = DispatchGroup()
-        let outputDrain = PipeDrain(output.fileHandleForReading)
-        let errorDrain = PipeDrain(errorPipe.fileHandleForReading)
-        outputDrain.start(in: drains)
-        errorDrain.start(in: drains)
-        if let inputData {
-            input.fileHandleForWriting.write(inputData)
-        }
-        try? input.fileHandleForWriting.close()
-
-        // Both pipes must drain concurrently. Reading stdout and then stderr
-        // can deadlock when a failed child fills stderr before closing stdout.
-        process.waitUntilExit()
-        drains.wait()
-        let data = outputDrain.data()
-        let errorData = errorDrain.data()
-
-        if process.terminationStatus != 0 {
-            let message = String(data: errorData, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
-                ?? String(data: data, encoding: .utf8) ?? "Command failed"
+        let result = try FastProcessRunner.run(
+            executable: toolPath,
+            arguments: args,
+            input: inputData,
+            environment: Self.childEnvironment(extraEnv: extraEnv)
+        )
+        if result.terminationStatus != 0 {
+            let data = result.standardOutput
+            let errorData = result.standardError
+            let fallback = result.terminationSignal.map {
+                "Bundled core terminated by signal \($0)"
+            } ?? "Command failed"
+            let message = String(data: errorData, encoding: .utf8).flatMap {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+            }
+                ?? String(data: data, encoding: .utf8).flatMap {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+                }
+                ?? fallback
             let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
             if normalized.contains("profile core changed since draft was loaded") {
                 throw ServiceError.profileCoreConflict(normalized)
             }
             throw ServiceError.toolFailed(normalized)
         }
-        return data
+        return result.standardOutput
     }
 
     /// Runs a CLI call off the main thread and delivers the typed result back

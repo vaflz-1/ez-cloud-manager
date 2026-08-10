@@ -28,9 +28,11 @@ extension CredentialsService {
     /// bundled headless CLI. Normal menus and rendering use the app snapshot;
     /// Command-R and reopening Workspaces pay one process boundary here.
     func refreshProfiles() throws -> [Profile] {
+        let revision = beginCompleteProfileRead()
         let profiles = try readProfilesFromDisk()
-        storeCompleteProfiles(profiles)
-        return profiles
+        return commitCompleteProfiles(profiles, ifUnchangedSince: revision)
+            ?? cachedProfiles()
+            ?? profiles
     }
 
     /// Raw fresh read used by AppDelegate's generation-gated refresh. The

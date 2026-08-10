@@ -6,6 +6,9 @@ import AppKit
 enum Product {
     static let name = "Kervik"
     static let tagline = "Calm command for cloud work."
+    static let emptyAddonsMessage = "Add-ons use only the Connections allowed in this workspace."
+    static let appearancePreferenceKey = "EZCloudManagerAppearance"
+    static let legacyAppearancePreferenceKey = "KervikAppearance"
 
     static func workspaceTitle(_ workspace: String) -> String {
         "\(workspace) — \(name)"
@@ -13,6 +16,15 @@ enum Product {
 
     static func toolTitle(_ tool: String, workspace: String) -> String {
         "\(tool) — \(workspace)"
+    }
+
+    static func savedAppearance(in defaults: UserDefaults = .standard) -> AppAppearance {
+        if defaults.object(forKey: appearancePreferenceKey) != nil {
+            return AppAppearance(rawValue: defaults.integer(forKey: appearancePreferenceKey)) ?? .system
+        }
+        let legacy = AppAppearance(rawValue: defaults.integer(forKey: legacyAppearancePreferenceKey)) ?? .system
+        defaults.set(legacy.rawValue, forKey: appearancePreferenceKey)
+        return legacy
     }
 }
 
@@ -46,13 +58,14 @@ enum UI {
     static let space8: CGFloat = 8
     static let space12: CGFloat = 12
     static let space16: CGFloat = 16
+    static let space20: CGFloat = 20
     static let space24: CGFloat = 24
     static let space32: CGFloat = 32
 
     static let pad = space24
     static let gap = space16
     static let cardPad = space16
-    static let cardRadius: CGFloat = 8
+    static let cardRadius: CGFloat = 10
     static let labelGap = space8
     static let rowHeight: CGFloat = 34
 

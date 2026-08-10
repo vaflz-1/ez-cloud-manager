@@ -9,7 +9,7 @@
   "runtime": { "type": "builtin", "entrypoint": "host:transfer" },
   "requires": { "connectors": [] },
   "name": "Transfer",
-  "description": "Export this profile to a .ezprofile file, or import one as a new profile.",
+  "description": "Export this workspace to a .ezprofile file, or import one as a new workspace.",
   "icon": "square.and.arrow.up.on.square",
   "category": "DevOps",
   "permissions": {
