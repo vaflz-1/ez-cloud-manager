@@ -6,14 +6,14 @@ EZ Cloud Manager is a local-first macOS app with a Go core and native AppKit UI.
 
 ```bash
 go test ./...
-swiftc ui/EZCloudManager.swift -o /tmp/EZCloudManager.check -framework AppKit
+swiftc -typecheck ui/*.swift -framework AppKit
 ./build.sh
 ```
 
 The build installs:
 
-- `/Users/octavian/Applications/EZ Cloud Manager.app`
-- `/Users/octavian/.local/bin/ezcloud`
+- `/Applications/EZ Cloud Manager.app` (or `$HOME/Applications` without system write access)
+- `$HOME/.local/bin/ezcloud`
 
 ## Guardrails
 

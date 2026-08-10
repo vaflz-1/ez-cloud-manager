@@ -2,25 +2,26 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+USER_HOME="${HOME:?HOME is not set}"
 APP_NAME="EZ Cloud Manager.app"
 # Install system-wide so the app shows up in Finder → Applications, Launchpad
 # and Spotlight. Falls back to ~/Applications if /Applications is not writable.
 APP_DIR="/Applications"
 if [ ! -w "$APP_DIR" ]; then
-  APP_DIR="$HOME/Applications"
+  APP_DIR="$USER_HOME/Applications"
   echo "warning: /Applications not writable — installing to $APP_DIR instead"
 fi
 APP_PATH="$APP_DIR/$APP_NAME"
-HOME_APP_PATH="$HOME/Applications/$APP_NAME"
-OLD_APP_PATH="/Users/octavian/Applications/Cloud EZ Manager.app"
-LEGACY_APP_PATH="/Users/octavian/Applications/AWS Profile Manager.app"
+HOME_APP_PATH="$USER_HOME/Applications/$APP_NAME"
+OLD_APP_PATH="$USER_HOME/Applications/Cloud EZ Manager.app"
+LEGACY_APP_PATH="$USER_HOME/Applications/AWS Profile Manager.app"
 BUILD_ROOT="${TMPDIR:-/tmp}/ez-cloud-manager-build"
 BUILD_APP="$BUILD_ROOT/$APP_NAME"
 DIST_DIR="$PROJECT_DIR/dist"
-CLI_LINK="/Users/octavian/.local/bin/ezcloud"
-OLD_CLI_LINK="/Users/octavian/.local/bin/cloudez"
-LEGACY_CLI_LINK="/Users/octavian/.local/bin/awspm"
-ICON_FILE="$PROJECT_DIR/assets/EZCloudManagerCloudGear.icns"
+CLI_LINK="$USER_HOME/.local/bin/ezcloud"
+OLD_CLI_LINK="$USER_HOME/.local/bin/cloudez"
+LEGACY_CLI_LINK="$USER_HOME/.local/bin/awspm"
+ICON_FILE="$PROJECT_DIR/assets/EZCloudManagerNexusCore.icns"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 pkill -x EZCloudManager 2>/dev/null || true
@@ -28,7 +29,7 @@ pkill -x CloudEZManager 2>/dev/null || true
 pkill -x AWSProfileManager 2>/dev/null || true
 
 rm -rf "$BUILD_ROOT"
-mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$DIST_DIR" "$(dirname "$CLI_LINK")" "/Users/octavian/Applications"
+mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$DIST_DIR" "$(dirname "$CLI_LINK")" "$USER_HOME/Applications"
 
 go build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
 
@@ -39,7 +40,7 @@ swiftc "$PROJECT_DIR"/ui/*.swift \
   -framework AppKit
 
 cp "$PROJECT_DIR/Info.plist" "$BUILD_APP/Contents/Info.plist"
-cp "$ICON_FILE" "$BUILD_APP/Contents/Resources/EZCloudManagerCloudGear.icns"
+cp "$ICON_FILE" "$BUILD_APP/Contents/Resources/EZCloudManagerNexusCore.icns"
 cp "$DIST_DIR/ezcloud" "$BUILD_APP/Contents/Resources/ezcloud"
 chmod +x "$BUILD_APP/Contents/MacOS/EZCloudManager" "$BUILD_APP/Contents/Resources/ezcloud"
 

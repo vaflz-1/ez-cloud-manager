@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>EZCloudManager</string>
 	<key>CFBundleIconFile</key>
-	<string>EZCloudManagerCloudGear</string>
+	<string>EZCloudManagerNexusCore</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.ez-cloud.manager</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>

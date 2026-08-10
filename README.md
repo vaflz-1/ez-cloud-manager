@@ -76,7 +76,7 @@ ezcloud audit --limit 20
 ## Build / install
 
 ```bash
-./build.sh    # builds Go CLI + Swift app, signs, installs to ~/Applications
+./build.sh    # builds Go CLI + Swift app, signs, installs to /Applications
 go test ./...
 ```
 
