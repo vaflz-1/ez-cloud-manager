@@ -14,13 +14,13 @@ import AppKit
 /// P1 (docs/PLATFORM.md): this window used to get its AWS profile name +
 /// region from ProfileWindowController's embedded sidebar selection. Now
 /// that the Hub has no sidebar, it owns a small AWS-profile picker of its
-/// own, scoped to `owningProfile`'s Accounts filter — the same filter rule
-/// CloudAccountsWindowController applies.
+/// own and reads AWS profiles directly from the provider rail. The owning
+/// global profile contributes only its non-secret environment.
 final class LaunchTemplatesWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let service: CredentialsService
 
-    /// The global profile this Launch Templates window is scoped to — set
-    /// once by present(owningProfile:), read to filter/env-scope AWS accounts.
+    /// The global profile this Launch Templates window is scoped to. It can
+    /// be refreshed while the window is open when core fields change.
     private(set) var owningProfile: Profile?
     /// The selected AWS credential-entry name (existing, unrelated meaning —
     /// see CloudAccountsWindowController's own terminology note).
@@ -70,10 +70,20 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
         loadAwsProfiles()
     }
 
-    /// Populates the AWS-profile picker from `owningProfile`'s Accounts
-    /// filter (same rule CloudAccountsWindowController applies: every AWS
-    /// account unless the profile shows all), preserving the previously
-    /// chosen profile across a reopen when it's still in range.
+    /// Refreshes metadata after a same-profile mutation whose environment did
+    /// not change. The Hub destroys this controller instead when envVars
+    /// change, so a draft can never cross cloud contexts.
+    func updateOwningProfile(_ profile: Profile) {
+        owningProfile = profile
+        guard window?.isVisible == true else { return }
+        let selected = self.profile.isEmpty ? "" : " · \(self.profile)"
+        window?.title = "Launch Templates — \(profile.name)\(selected)"
+    }
+
+    /// Populates the AWS-profile picker directly from the provider rail,
+    /// preserving the previously chosen profile across a reopen when it is
+    /// still available. Launch Templates deliberately does not read another
+    /// plugin's settings, so it remains usable when Cloud Accounts is disabled.
     private func loadAwsProfiles() {
         guard let owningProfile else { return }
         busy("Loading AWS profiles…")
@@ -81,12 +91,9 @@ final class LaunchTemplatesWindowController: NSWindowController, NSTableViewData
             guard let self else { return }
             switch result {
             case .success(let response):
-                let scoped = !owningProfile.showAllAccounts
-                let names = response.profiles.map(\.name).filter { name in
-                    !scoped || owningProfile.accounts.contains(AccountRef(provider: "aws", account: name))
-                }
+                let names = response.profiles.map(\.name)
                 guard !names.isEmpty else {
-                    self.done("No AWS accounts available in “\(owningProfile.name)” — add one from Cloud Accounts first.")
+                    self.done("No AWS CLI profiles are available in “\(owningProfile.name)”. Configure one first, then reopen Launch Templates.")
                     return
                 }
                 let previous = self.profile

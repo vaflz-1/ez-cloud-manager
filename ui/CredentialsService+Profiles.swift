@@ -1,5 +1,13 @@
 import Foundation
 
+private struct ProfileCoreSaveRequest: Encodable {
+    let id: String
+    let name: String
+    let envVars: [EnvVar]
+    let expectedName: String
+    let expectedEnvVars: [EnvVar]
+}
+
 /// Global profile management (docs/PLATFORM.md phase P0) — the
 /// `ezcloud profile …` verbs. Unlike the credential-entry operations in
 /// CredentialsService, these are provider-agnostic and app-global rather
@@ -20,7 +28,9 @@ extension CredentialsService {
     }
 
     func createProfile(name: String) throws -> Profile {
-        try decode(run(["profile", "create", "--name", name], input: nil))
+        let created: Profile = try decode(run(["profile", "create", "--name", name], input: nil))
+        postProfileListChange(.created, profileID: created.id)
+        return created
     }
 
     func renameProfile(id: String, to newName: String) throws -> Profile {
@@ -32,20 +42,45 @@ extension CredentialsService {
         if let newName, !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             args += ["--name", newName]
         }
-        return try decode(run(args, input: nil))
+        let duplicate: Profile = try decode(run(args, input: nil))
+        postProfileListChange(.duplicated, profileID: duplicate.id)
+        return duplicate
     }
 
     func deleteProfile(id: String) throws {
         _ = try run(["profile", "delete", "--id", id], input: nil)
+        postProfileListChange(.deleted, profileID: id)
     }
 
-    /// Whole-object PUT — same convention as the old `saveWorkspace`. Sends
-    /// every field back, including any Accounts/EnvVars/Settings edits made
-    /// in the Profile Manager, and returns the saved (server-normalized)
-    /// profile.
-    func saveProfile(_ profile: Profile) throws -> Profile {
-        let payload = try JSONEncoder().encode(profile)
+    /// Saves only the core fields the Profile Manager owns. Addon state stays
+    /// server-owned, so an older editor snapshot cannot overwrite newer
+    /// enabledPlugins/settings/windowState written by another addon window.
+    /// The baseline core snapshot is a compare-and-swap guard: another
+    /// process cannot silently replace newer name/env edits with this draft.
+    func saveProfile(
+        _ profile: Profile,
+        expectedName: String,
+        expectedEnvVars: [EnvVar]
+    ) throws -> Profile {
+        let request = ProfileCoreSaveRequest(
+            id: profile.id,
+            name: profile.name,
+            envVars: profile.envVars,
+            expectedName: expectedName,
+            expectedEnvVars: expectedEnvVars
+        )
+        let payload = try JSONEncoder().encode(request)
         return try decode(run(["profile", "save"], inputData: payload))
+    }
+
+    /// Saves ONLY the Cloud Accounts plugin's settings blob (account scoping)
+    /// on a profile, without touching any other field — the P1.5 replacement
+    /// for editing Profile.accounts/showAllAccounts directly. Returns the
+    /// whole updated profile, same convention as `plugins enable/disable`.
+    @discardableResult
+    func saveCloudAccountsSettings(profileID: String, _ settings: CloudAccountsSettings) throws -> Profile {
+        let payload = try JSONEncoder().encode(settings)
+        return try decode(run(["profile", "settings", "set", "--id", profileID, "--plugin", PluginID.cloudAccounts], inputData: payload))
     }
 
     /// Writes a `.ezprofile` zip to url. 0600: as sensitive as any other
@@ -59,6 +94,15 @@ extension CredentialsService {
     /// Imports a `.ezprofile` zip as a brand-new profile (fresh id; a name
     /// clash is resolved with a suffix on the Go side, never a failure).
     func importProfile(from url: URL) throws -> Profile {
-        try decode(run(["profile", "import", "--input", url.path], input: nil))
+        let imported: Profile = try decode(run(["profile", "import", "--input", url.path], input: nil))
+        postProfileListChange(.imported, profileID: imported.id)
+        return imported
+    }
+
+    private func postProfileListChange(_ mutation: ProfileListMutation, profileID: String) {
+        NotificationCenter.default.post(
+            name: .profileListDidChange,
+            object: ProfileListChange(mutation, profileID: profileID)
+        )
     }
 }

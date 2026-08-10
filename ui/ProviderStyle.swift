@@ -60,6 +60,18 @@ enum ProviderStyle {
             return true
         }
     }
+
+    /// Same drawn-dot approach as `dot(_:diameter:)`, but neutral — used
+    /// wherever a single-color badge would misrepresent a global profile
+    /// that spans multiple providers or shows every account (the Hub's
+    /// profile switcher, in particular).
+    static func neutralDot(diameter: CGFloat = 7) -> NSImage {
+        NSImage(size: NSSize(width: diameter, height: diameter), flipped: false) { rect in
+            NSColor.tertiaryLabelColor.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+    }
 }
 
 /// The Ko-fi heart: quiet at rest, beats while hovered, pops on click.

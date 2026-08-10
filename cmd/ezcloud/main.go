@@ -73,6 +73,8 @@ func main() {
 		writeJSON(infos)
 	case "list", "get", "save", "delete", "parse", "schema", "export", "activate":
 		profileCommand(cmd, rest)
+	case "check":
+		checkCommand(rest)
 	case "ws":
 		wsCommand(rest)
 	case "profile":
@@ -205,11 +207,13 @@ func usage() {
   ezcloud schema   [--provider ID]
   ezcloud export   [--provider ID] --profile NAME [--format env|dotenv|ini|json]
   ezcloud activate [--provider ID] --profile NAME
+  ezcloud check    [--provider ID] --profile NAME [--timeout SECONDS]
   ezcloud ws       list | save | delete --name NAME | rename --old A --new B
   ezcloud profile  list|show|create|save|rename|duplicate|delete|export|import|migrate
+  ezcloud profile  settings get|set --id ID --plugin PLUGIN_ID
   ezcloud audit    [--limit N]
   ezcloud lt       templates|versions|get|apply|set-default|delete-versions …
-  ezcloud plugins  list [--profile ID] | enable|disable --profile ID --id ID
+  ezcloud plugins  list [--profile ID] | update --profile ID < changes.json | enable|disable --profile ID --id ID
 
 The default provider is "aws", preserving the original single-cloud behavior.`)
 }

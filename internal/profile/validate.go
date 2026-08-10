@@ -1,24 +1,24 @@
 package profile
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"ez-cloud-manager/internal/plugin"
 )
 
-// validateProfile returns a normalized copy (trimmed name, normalized
-// accounts/env vars) or an error if any field is invalid. It never copies
-// ID/Version/timestamps — callers (Create/Save) set those explicitly so a
-// caller can never smuggle a forged ID or version through validation.
+// validateProfile returns a normalized copy (trimmed name, normalized env
+// vars/settings) or an error if any field is invalid. It never copies
+// ID/Version/timestamps — callers (Create/mutateProfile) set those explicitly
+// so a caller can never smuggle a forged ID, version or save time through
+// validation.
 func validateProfile(p Profile) (Profile, error) {
 	name := strings.TrimSpace(p.Name)
 	if err := validateName(name); err != nil {
-		return Profile{}, err
-	}
-	accounts, err := normalizeAccounts(p.Accounts)
-	if err != nil {
 		return Profile{}, err
 	}
 	envVars, err := normalizeEnvVars(p.EnvVars)
@@ -29,14 +29,16 @@ func validateProfile(p Profile) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
+	settings, err := normalizeSettings(p.Settings)
+	if err != nil {
+		return Profile{}, err
+	}
 	return Profile{
-		Name:            name,
-		ShowAllAccounts: p.ShowAllAccounts,
-		Accounts:        accounts,
-		EnvVars:         envVars,
-		EnabledPlugins:  enabledPlugins,
-		Settings:        p.Settings,
-		WindowState:     p.WindowState,
+		Name:           name,
+		EnvVars:        envVars,
+		EnabledPlugins: enabledPlugins,
+		Settings:       settings,
+		WindowState:    p.WindowState,
 	}, nil
 }
 
@@ -55,7 +57,10 @@ func validateName(name string) error {
 
 // normalizeAccounts trims each reference, rejects empty or control-laden
 // fields, and drops duplicate (provider, account) pairs while preserving
-// order — same shape as internal/workspace's normalizeMembers.
+// order — same shape as internal/workspace's normalizeMembers. Since P1.5
+// this is called from normalizeCloudAccountsBlob rather than directly from
+// validateProfile (Accounts moved off the core Profile), but the guarantee
+// is unchanged.
 func normalizeAccounts(in []AccountRef) ([]AccountRef, error) {
 	out := make([]AccountRef, 0, len(in))
 	seen := make(map[AccountRef]bool, len(in))
@@ -151,6 +156,57 @@ func normalizeEnabledPlugins(in []string) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// normalizeSettings validates the per-plugin settings map: caps the number
+// of blobs and each blob's size, requires each key be a valid non-empty
+// non-control-character id and each value be well-formed JSON, and — for the
+// one key this package knows the shape of (plugin.CloudAccountsID) —
+// delegates to normalizeCloudAccountsBlob so that key's contents get the
+// same validation Accounts/ShowAllAccounts always had before P1.5. Every
+// other key's blob is accepted as opaque, unvalidated JSON.
+func normalizeSettings(in map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(in) > maxSettingsBlobs {
+		return nil, fmt.Errorf("at most %d plugin settings blobs are allowed per profile", maxSettingsBlobs)
+	}
+	out := make(map[string]json.RawMessage, len(in))
+	for id, raw := range in {
+		id = strings.TrimSpace(id)
+		if id == "" || hasControlChars(id) {
+			return nil, errors.New("plugin settings key must be a valid non-empty id")
+		}
+		if len(raw) > maxSettingsBlobBytes {
+			return nil, fmt.Errorf("plugin settings blob %q exceeds %d bytes", id, maxSettingsBlobBytes)
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("plugin settings blob %q is not valid JSON", id)
+		}
+		if id == plugin.CloudAccountsID {
+			normalized, err := normalizeCloudAccountsBlob(raw)
+			if err != nil {
+				return nil, err
+			}
+			raw = normalized
+		}
+		out[id] = raw
+	}
+	return out, nil
+}
+
+// normalizeCloudAccountsBlob re-validates a Settings[plugin.CloudAccountsID]
+// blob's Accounts the same way the pre-P1.5 top-level Profile.Accounts field
+// always was (reusing normalizeAccounts unchanged — same control-char/dedupe
+// guarantee it always had) and returns the re-marshaled, normalized blob.
+func normalizeCloudAccountsBlob(raw json.RawMessage) (json.RawMessage, error) {
+	var s CloudAccountsSettings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("cloud-accounts settings: %w", err)
+	}
+	accounts, err := normalizeAccounts(s.Accounts)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(CloudAccountsSettings{ShowAllAccounts: s.ShowAllAccounts, Accounts: accounts})
 }
 
 // looksLikeSecret mirrors the Swift UI's isSecretKey substring fallback, but

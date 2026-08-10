@@ -7,6 +7,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -16,6 +17,12 @@ import (
 type ProfileSummary struct {
 	Name string   `json:"name"`
 	Keys []string `json:"keys"`
+	// Active marks the provider's own currently-active/default entry (e.g.
+	// gcloud's active configuration). Only providers with a native "active"
+	// concept that can BLOCK an operation (currently: gcp's delete-refuses-
+	// if-active rule) set this; AWS/Azure leave it false (omitted), which is
+	// the correct "not applicable" reading, not "definitely not active".
+	Active bool `json:"active,omitempty"`
 }
 
 // Profile is a provider-agnostic set of credential fields for one profile.
@@ -101,6 +108,30 @@ type Activator interface {
 	// ActivateLabel is the human-facing action name (e.g. "Set as gcloud
 	// active configuration").
 	ActivateLabel() string
+}
+
+// Checker is an optional capability: providers that can verify a profile's
+// credentials are actually live (a vendor identity call, e.g. `aws sts
+// get-caller-identity`) implement it so the UI can offer "Test Connection".
+// A provider not asserting Checker simply doesn't support it yet — the CLI
+// and UI both treat that as a clean, expected outcome, not an error.
+type Checker interface {
+	// Check runs the provider's own identity/liveness call for the named
+	// profile, scoped by ctx so a hung vendor CLI can be aborted. A failed
+	// check (bad/expired credentials, no network) is reported via
+	// CheckResult.OK/Error, NOT a returned error — err is reserved for
+	// something this call itself couldn't attempt (e.g. an unreadable path).
+	Check(ctx context.Context, path, name string) (CheckResult, error)
+}
+
+// CheckResult is the outcome of a Checker.Check call.
+type CheckResult struct {
+	OK bool `json:"ok"`
+	// Identity is a small set of non-secret identity facts the vendor CLI
+	// returned (e.g. AWS account/ARN) — present only when OK.
+	Identity map[string]string `json:"identity,omitempty"`
+	// Error is a human-readable failure reason — present only when !OK.
+	Error string `json:"error,omitempty"`
 }
 
 var (

@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ez-cloud-manager/internal/audit"
 	"ez-cloud-manager/internal/plugin"
+	profilemodel "ez-cloud-manager/internal/profile"
 )
 
 // ezcloudBinary is built once (TestMain) and exercised as a real subprocess
@@ -327,5 +329,102 @@ func TestPluginsEnableRejectedDoesNotWriteAuditEntry(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("got %d audit events, want 0 for a rejected enable: %+v", len(events), events)
+	}
+}
+
+func TestPluginsUpdateAppliesBatchOnceAndPreservesUnknownEnabledIDs(t *testing.T) {
+	e := newCLIEnv(t)
+	created, err := profilemodel.Create(filepath.Join(e.dataDir, "profiles"), profilemodel.Profile{
+		Name:           "batch",
+		EnabledPlugins: []string{"some-future-plugin", plugin.CloudAccountsID},
+	})
+	if err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	body, err := json.Marshal(pluginUpdateRequest{Changes: map[string]bool{
+		plugin.CloudAccountsID:   false,
+		plugin.LaunchTemplatesID: true,
+		plugin.TransferID:        true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := e.runStdin(t, string(body), "plugins", "update", "--profile", created.ID)
+	if code != 0 {
+		t.Fatalf("update exit %d, stderr: %s", code, stderr)
+	}
+	var saved profilemodel.Profile
+	if err := json.Unmarshal([]byte(stdout), &saved); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, stdout)
+	}
+	wantEnabled := []string{"some-future-plugin", plugin.LaunchTemplatesID, plugin.TransferID}
+	if len(saved.EnabledPlugins) != len(wantEnabled) {
+		t.Fatalf("enabledPlugins = %+v, want %+v", saved.EnabledPlugins, wantEnabled)
+	}
+	for i := range wantEnabled {
+		if saved.EnabledPlugins[i] != wantEnabled[i] {
+			t.Fatalf("enabledPlugins = %+v, want %+v", saved.EnabledPlugins, wantEnabled)
+		}
+	}
+
+	events, err := audit.List(filepath.Join(e.configDir, "audit.log"), 0)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d audit events, want one batch event: %+v", len(events), events)
+	}
+	if events[0].Action != "plugins-update" || events[0].Profile != "batch" {
+		t.Fatalf("batch audit event = %+v", events[0])
+	}
+	wantKeys := []string{plugin.CloudAccountsID, plugin.LaunchTemplatesID, plugin.TransferID}
+	if len(events[0].Keys) != len(wantKeys) {
+		t.Fatalf("audit keys = %+v, want %+v", events[0].Keys, wantKeys)
+	}
+	for i := range wantKeys {
+		if events[0].Keys[i] != wantKeys[i] {
+			t.Fatalf("audit keys = %+v, want %+v", events[0].Keys, wantKeys)
+		}
+	}
+}
+
+func TestPluginsUpdateValidatesWholeBatchBeforeMutation(t *testing.T) {
+	e := newCLIEnv(t)
+	created, err := profilemodel.Create(filepath.Join(e.dataDir, "profiles"), profilemodel.Profile{
+		Name:           "atomic",
+		EnabledPlugins: []string{plugin.TransferID},
+	})
+	if err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	body, err := json.Marshal(pluginUpdateRequest{Changes: map[string]bool{
+		plugin.CloudAccountsID: true,
+		"does-not-exist":       true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := e.runStdin(t, string(body), "plugins", "update", "--profile", created.ID)
+	if code == 0 {
+		t.Fatal("expected update with an unknown plugin to fail")
+	}
+	if !strings.Contains(stderr, "unknown plugin") {
+		t.Fatalf("stderr = %q, want unknown-plugin error", stderr)
+	}
+	persisted, err := profilemodel.Get(filepath.Join(e.dataDir, "profiles"), created.ID)
+	if err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if len(persisted.EnabledPlugins) != 1 || persisted.EnabledPlugins[0] != plugin.TransferID {
+		t.Fatalf("profile mutated after rejected batch: %+v", persisted.EnabledPlugins)
+	}
+	events, err := audit.List(filepath.Join(e.configDir, "audit.log"), 0)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("got audit events for a rejected batch: %+v", events)
 	}
 }

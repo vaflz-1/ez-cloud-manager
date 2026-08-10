@@ -50,6 +50,12 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     var providerPopup: NSPopUpButton!
     var pasteView: NSTextView!
     var pasteLabel: NSTextField!
+    /// Faint overlay hint shown only while pasteView is empty — an empty
+    /// NSTextView otherwise reads as a void, not an input.
+    var pasteViewPlaceholder: NSTextField!
+    /// Faint centered hint shown only when fieldRows has no populated
+    /// values — an empty grid otherwise looks broken rather than "add one".
+    var fieldsEmptyHintLabel: NSTextField!
     var statusLabel: NSTextField!
     var variablesTitleLabel: NSTextField!
     var variablesSummaryLabel: NSTextField!
@@ -57,6 +63,34 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     var activateButton: NSButton!
     var exportButton: NSPopUpButton!
     var profileSearchField: NSSearchField!
+
+    // MARK: Test Connection (CloudAccountsWindowController+Diagnostics.swift)
+
+    var testConnectionButton: NSButton!
+    var testConnectionSpinner: NSProgressIndicator!
+    var testConnectionResultIcon: NSImageView!
+    var testConnectionResultLabel: NSTextField!
+    var testConnectionDetailsButton: NSButton!
+    /// The full (untruncated) error text behind `testConnectionDetailsButton`
+    /// — shown in a popover, kept separate from the short inline label.
+    var connectionTestFullError: String?
+
+    // MARK: Guided gcloud delete (CloudAccountsWindowController+GuidedDelete.swift)
+    // Built fresh on each presentGuidedGcpDeleteSheet call — these just hold
+    // the current sheet's controls so its button/field actions (which must
+    // be @objc selectors on self) can reach them.
+
+    var guidedDeleteWindow: NSWindow!
+    var guidedDeletePopup: NSPopUpButton!
+    var guidedDeleteNewNameField: NSTextField!
+    var guidedDeleteErrorLabel: NSTextField!
+    var guidedDeleteSpinner: NSProgressIndicator!
+    var guidedDeleteConfirmButton: NSButton!
+    var guidedDeleteCancelButton: NSButton!
+    var guidedDeleteTargetName = ""
+    /// True once the field only offers "create a new configuration" because
+    /// there is no other one to activate instead.
+    var guidedDeleteForcedCreate = false
 
     // MARK: Multi-provider state (credential entries — see the terminology note above)
 
@@ -72,8 +106,6 @@ final class CloudAccountsWindowController: NSWindowController, NSTableViewDataSo
     /// Profile whose selection was hidden by the current filter; restored
     /// automatically the moment the filter lets it back in.
     var hiddenSelection: (provider: String, name: String)?
-    /// 3px accent stripe on the PROFILE card, tinted by the editing provider.
-    var profileCardStripe: NSView!
 
     /// Provider owning the currently selected/edited credential entry.
     var selectedProvider = "aws"

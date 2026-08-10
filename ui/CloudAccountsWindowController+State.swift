@@ -43,21 +43,23 @@ extension CloudAccountsWindowController {
                 clearDetailForNoSelection()
             }
             updateProfileMode()
-            setStatus("Loaded \(loadedCount) profile(s) across \(profilesByProvider.count) provider(s)")
+            setStatus("Loaded \(loadedCount) account(s) across \(profilesByProvider.count) provider(s)")
         }
     }
 
     /// Rebuilds the sidebar rows from provider groups, applying the search
-    /// text and this window's profile Accounts filter (unless the profile
-    /// shows all accounts).
+    /// text and this window's Cloud Accounts scoping settings (unless the
+    /// profile shows all accounts) — see Profile.cloudAccountsSettings,
+    /// edited in the Scope sheet (CloudAccountsWindowController+Scope.swift).
     func rebuildSidebarRows() {
         let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let scoped = !profile.showAllAccounts
+        let scope = profile.cloudAccountsSettings
+        let scoped = !scope.showAllAccounts
         var rows: [SidebarRow] = []
         for info in catalog.providers {
             let all = profilesByProvider[info.id] ?? []
             let visible = all.filter { summary in
-                if scoped, !profile.accounts.contains(AccountRef(provider: info.id, account: summary.name)) {
+                if scoped, !scope.accounts.contains(AccountRef(provider: info.id, account: summary.name)) {
                     return false
                 }
                 return query.isEmpty || summary.name.localizedCaseInsensitiveContains(query)
@@ -85,7 +87,7 @@ extension CloudAccountsWindowController {
             hiddenSelection = (selectedProvider, name)
             clearDetailForNoSelection()
             setStatus(query.isEmpty
-                ? "“\(name)” isn’t in this profile’s accounts — edit them from Manage Profiles, or turn on “show all accounts”"
+                ? "“\(name)” isn’t in this profile’s scope — edit it from the Scope toolbar button, or turn on “show all accounts”"
                 : "“\(name)” is hidden by the filter — clear the search to restore it")
         } else if selectedProfileName == nil, let hidden = hiddenSelection,
                   let idx = sidebarIndex(ofProfile: hidden.name, provider: hidden.provider) {
@@ -119,8 +121,10 @@ extension CloudAccountsWindowController {
             reloadFieldsTable()
             syncProviderPopup()
             updatePasteLabel()
+            updatePasteViewPlaceholder()
             updateVariablesSummary()
             updateProfileMode()
+            resetConnectionTestState() // never leave a stale result from a different account on screen
             setStatus("Loaded \(profileResponse.name) (\(catalog.providerDisplayName(provider)))")
         } catch {
             showError(error.localizedDescription)
@@ -137,8 +141,15 @@ extension CloudAccountsWindowController {
         reloadFieldsTable()
         syncProviderPopup()
         updatePasteLabel()
+        updatePasteViewPlaceholder()
         updateVariablesSummary()
         updateProfileMode()
+        resetConnectionTestState()
+    }
+
+    /// Hides the paste-box hint the moment there's any text — see textDidChange below.
+    func updatePasteViewPlaceholder() {
+        pasteViewPlaceholder?.isHidden = !pasteView.string.isEmpty
     }
 
     // MARK: - Schema-driven field knowledge
@@ -276,12 +287,9 @@ extension CloudAccountsWindowController {
             popup.selectItem(at: idx)
         }
         popup.isEnabled = (selectedProfileName == nil)
-        // The accent stripe ties the detail card back to the sidebar's
-        // provider colors.
-        profileCardStripe?.layer?.backgroundColor =
-            ProviderStyle.color(currentEditingProvider()).withAlphaComponent(0.9).cgColor
         updateActivateButton()
         updateExportButton()
+        updateTestConnectionButton()
     }
 
     func updatePasteLabel() {
@@ -300,12 +308,25 @@ extension CloudAccountsWindowController {
         exportButton?.isEnabled = selectedProfileName != nil
     }
 
+    /// Test Connection is always visible (never hidden per-provider — even
+    /// azure, which doesn't implement Check yet, reports a clean "not
+    /// supported" result rather than the button mysteriously disappearing,
+    /// per docs/PLATFORM.md principle 6). It's only ENABLED once a saved
+    /// account is selected.
+    func updateTestConnectionButton() {
+        let enabled = selectedProfileName != nil
+        testConnectionButton?.isEnabled = enabled
+        testConnectionButton?.toolTip = enabled ? nil : "Select a saved account to test its credentials"
+    }
+
     func updateVariablesSummary() {
         if fieldRows.isEmpty {
-            variablesSummaryLabel.stringValue = "Select a profile or click + to create one"
+            variablesSummaryLabel.stringValue = "Select an account or click + to create one"
+            fieldsEmptyHintLabel?.isHidden = true // sidebar hint ("select a profile") covers this state better
             return
         }
         let filled = fieldRows.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+        fieldsEmptyHintLabel?.isHidden = filled > 0
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty {
             variablesSummaryLabel.stringValue = "\(name): \(filled)/\(fieldRows.count) variables editable"
@@ -317,20 +338,21 @@ extension CloudAccountsWindowController {
     func updateProfileMode() {
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty && selectedProfileName == nil && fieldRows.isEmpty {
-            profileModeLabel.stringValue = "No profile selected"
-            saveButton.title = "Create profile"
+            profileModeLabel.stringValue = "No account selected"
+            saveButton.title = "Create Account"
             saveButton.isEnabled = false
         } else if !name.isEmpty && profileExists(name, provider: currentEditingProvider()) {
-            profileModeLabel.stringValue = "Updating existing profile"
-            saveButton.title = "Update profile"
+            profileModeLabel.stringValue = "Updating existing account"
+            saveButton.title = "Update Account"
             saveButton.isEnabled = !fieldRows.isEmpty
         } else {
-            profileModeLabel.stringValue = "Creating new profile"
-            saveButton.title = "Create profile"
+            profileModeLabel.stringValue = "Creating new account"
+            saveButton.title = "Create Account"
             saveButton.isEnabled = !name.isEmpty && !fieldRows.isEmpty
         }
         updateActivateButton()
         updateExportButton()
+        updateTestConnectionButton()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -340,6 +362,8 @@ extension CloudAccountsWindowController {
             updateVariablesSummary()
         } else if control === profileSearchField {
             rebuildSidebarRows()
+        } else if control === guidedDeleteNewNameField {
+            updateGuidedDeleteConfirmEnabled()
         }
     }
 
@@ -347,6 +371,7 @@ extension CloudAccountsWindowController {
         guard notification.object as? NSTextView == pasteView else {
             return
         }
+        updatePasteViewPlaceholder()
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(autoParsePastedCredentials), object: nil)
         perform(#selector(autoParsePastedCredentials), with: nil, afterDelay: 0.25)
     }

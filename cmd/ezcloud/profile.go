@@ -17,20 +17,35 @@ type migrateResponse struct {
 }
 
 // profileCreateRequest is the optional stdin payload for `profile create`
-// (accounts/env vars can also be added later via `profile save`).
+// (env vars can also be added later via `profile save`; account scoping is
+// the Cloud Accounts plugin's own settings blob — see `profile settings`).
 type profileCreateRequest struct {
-	Accounts []profile.AccountRef `json:"accounts"`
-	EnvVars  []profile.EnvVar     `json:"envVars"`
+	EnvVars []profile.EnvVar `json:"envVars"`
+}
+
+// profileSaveRequest is intentionally limited to the fields owned by the
+// Profile Manager. Older clients may still send a whole Profile; encoding/json
+// ignores those extra fields and UpdateCore preserves the fresh plugin-owned
+// state from disk.
+type profileSaveRequest struct {
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	EnvVars         []profile.EnvVar `json:"envVars"`
+	ExpectedName    string           `json:"expectedName"`
+	ExpectedEnvVars []profile.EnvVar `json:"expectedEnvVars"`
+	// UpdatedAt is accepted from the legacy whole-Profile request shape as
+	// a stricter fallback CAS when no explicit core snapshot is present.
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // profileMgmtCommand manages global profiles — the platform-v2.0 container
-// of cloud-account references, env vars and (later) plugin/settings state
-// that one app window binds to (docs/PLATFORM.md phase P0). Named distinctly
-// from profileCommand, which predates it and manages per-provider credential
-// entries (--profile NAME) — an unrelated, unchanged concept.
+// of env vars and (later) plugin/settings state that one app window binds to
+// (docs/PLATFORM.md phase P0). Named distinctly from profileCommand, which
+// predates it and manages per-provider credential entries (--profile NAME)
+// — an unrelated, unchanged concept.
 func profileMgmtCommand(args []string) {
 	if len(args) < 1 {
-		fail(fmt.Errorf("usage: ezcloud profile list|show|create|save|rename|duplicate|delete|export|import|migrate"))
+		fail(fmt.Errorf("usage: ezcloud profile list|show|create|save|rename|duplicate|delete|export|import|migrate|settings"))
 	}
 	root, err := profile.DefaultRoot()
 	if err != nil {
@@ -72,30 +87,36 @@ func profileMgmtCommand(args []string) {
 		}
 
 		req := readOptionalCreateRequest()
-		p, err := profile.Create(root, profile.Profile{Name: *name, Accounts: req.Accounts, EnvVars: req.EnvVars})
+		p, err := profile.Create(root, profile.Profile{Name: *name, EnvVars: req.EnvVars})
 		if err != nil {
 			fail(err)
 		}
 		auditRecordKeys("profile-create", "", p.Name, nil)
 		writeJSON(p)
 	case "save":
-		// Whole-object PUT (same convention as the legacy `ws save`): the
-		// Profile Manager UI sends the full profile back, including any
-		// Accounts/EnvVars edits.
+		// Targeted core update: plugin enablement, plugin settings and window
+		// state have separate writers and must survive a stale UI draft.
 		fs := flag.NewFlagSet("profile save", flag.ExitOnError)
 		output := fs.String("output", "json", "output format (json only)")
 		_ = fs.Parse(rest)
 		requireJSONOutput(*output, "profile save")
 
-		var p profile.Profile
-		if err := json.NewDecoder(io.LimitReader(os.Stdin, maxStdinBytes)).Decode(&p); err != nil {
+		var req profileSaveRequest
+		if err := json.NewDecoder(io.LimitReader(os.Stdin, maxStdinBytes)).Decode(&req); err != nil {
 			fail(fmt.Errorf("read profile json: %w", err))
 		}
-		old, _ := profile.Get(root, p.ID)
-		if err := profile.Save(root, p); err != nil {
+		old, err := profile.Get(root, req.ID)
+		if err != nil {
 			fail(err)
 		}
-		saved, err := profile.Get(root, p.ID)
+		saved, err := profile.UpdateCore(root, profile.CoreUpdate{
+			ID:                req.ID,
+			Name:              req.Name,
+			EnvVars:           req.EnvVars,
+			ExpectedName:      req.ExpectedName,
+			ExpectedEnvVars:   req.ExpectedEnvVars,
+			ExpectedUpdatedAt: req.UpdatedAt,
+		})
 		if err != nil {
 			fail(err)
 		}
@@ -191,8 +212,60 @@ func profileMgmtCommand(args []string) {
 			fail(err)
 		}
 		writeJSON(migrateResponse{Migrated: migrated})
+	case "settings":
+		profileSettingsCommand(rest, root)
 	default:
 		fail(fmt.Errorf("unknown profile subcommand %q", sub))
+	}
+}
+
+// profileSettingsCommand is the generic (any plugin id) per-plugin settings
+// accessor (docs/PLATFORM.md principle 5): `get` prints the raw JSON blob a
+// profile carries for --plugin (or "{}" if it has none); `set` reads a raw
+// JSON blob from stdin and stores only that namespace, returning the updated
+// profile.
+func profileSettingsCommand(args []string, root string) {
+	if len(args) < 1 {
+		fail(fmt.Errorf("usage: ezcloud profile settings get|set --id ID --plugin PLUGIN_ID"))
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("profile settings "+sub, flag.ExitOnError)
+	id := fs.String("id", "", "profile id")
+	pluginID := fs.String("plugin", "", "plugin id (settings namespace)")
+	output := fs.String("output", "json", "output format (json only)")
+	_ = fs.Parse(rest)
+	requireJSONOutput(*output, "profile settings "+sub)
+	resolvedID := requireProfileID(*id)
+	if *pluginID == "" {
+		fail(fmt.Errorf("--plugin is required"))
+	}
+
+	switch sub {
+	case "get":
+		p, err := profile.Get(root, resolvedID)
+		if err != nil {
+			fail(err)
+		}
+		blob := profile.GetSettingsBlob(p, *pluginID)
+		if blob == nil {
+			blob = json.RawMessage("{}")
+		}
+		os.Stdout.Write(blob)
+	case "set":
+		raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes))
+		if err != nil {
+			fail(err)
+		}
+		saved, err := profile.SetSettingsBlob(root, resolvedID, *pluginID, raw)
+		if err != nil {
+			fail(err)
+		}
+		// Never the blob's contents — only which plugin's settings changed,
+		// same "key names, never values" invariant as every other audit entry.
+		auditRecordKeys("plugin-settings-save", "", saved.Name, []string{*pluginID})
+		writeJSON(saved)
+	default:
+		fail(fmt.Errorf("unknown profile settings subcommand %q", sub))
 	}
 }
 

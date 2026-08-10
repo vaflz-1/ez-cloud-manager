@@ -8,6 +8,13 @@ import Foundation
 struct ProfileSummary: Codable {
     let name: String
     let keys: [String]
+    /// Marks the provider's own active/default entry (currently only gcloud
+    /// configurations set this — see internal/provider.ProfileSummary.Active).
+    /// Optional/omitted, not just false-by-default, so a provider that
+    /// doesn't track this concept at all reads as "not applicable".
+    let active: Bool?
+
+    var isActive: Bool { active ?? false }
 }
 
 struct ListResponse: Codable {
@@ -81,7 +88,9 @@ struct ProviderSchema: Codable {
 // avoid colliding with that older, unchanged meaning.
 
 /// One (provider, account) credential-entry reference. Never stores secrets.
-struct AccountRef: Codable, Equatable {
+/// Hashable so the Scope sheet (CloudAccountsWindowController+Scope.swift)
+/// can track selection as a Set.
+struct AccountRef: Codable, Equatable, Hashable {
     let provider: String
     let account: String
 }
@@ -95,9 +104,8 @@ struct EnvVar: Codable, Equatable {
 
 /// A lossless wrapper for a JSON value this app doesn't interpret. Profile's
 /// `windowState` is opaque here (Go stores it as json.RawMessage) — P0 has no
-/// UI for it, but it must still round-trip untouched through the whole-object
-/// PUT in `saveProfile`, so P1 can start reading/writing it with no data
-/// migration.
+/// UI for it, and targeted core/plugin mutations must preserve it so a later
+/// window-state contribution can start using it without a data migration.
 enum JSONValue: Codable, Equatable {
     case null
     case bool(Bool)
@@ -130,23 +138,65 @@ enum JSONValue: Codable, Equatable {
     }
 }
 
-/// A global profile: the unit one app window binds to.
+/// A global profile: the unit one app window binds to. Per
+/// docs/PLATFORM.md principle 5 ("core owns no plugin data"), account
+/// scoping is NOT a field here — it lives in `settings[PluginID.cloudAccounts]`
+/// (see `cloudAccountsSettings` below), owned and edited by the Cloud
+/// Accounts plugin itself.
 struct Profile: Codable {
     var id: String
     var name: String
-    /// Disables the Accounts filter (the window shows every account across
-    /// every provider instead of only the referenced ones).
-    var showAllAccounts: Bool
-    var accounts: [AccountRef]
     var envVars: [EnvVar]
     /// P1 placeholder — always empty until the plugin host exists.
     var enabledPlugins: [String]
-    /// P1+ overrides placeholder, unused by any UI in P0.
-    var settings: [String: String]?
+    /// Per-plugin settings blobs (P1.5): one opaque JSON value per plugin id.
+    var settings: [String: JSONValue]?
     var windowState: JSONValue?
     var version: Int
     var createdAt: String
+    /// Last explicit core-profile save. Addon/settings writes update
+    /// `updatedAt` without changing this user-facing save timestamp.
+    var savedAt: String
     var updatedAt: String
+}
+
+/// The Cloud Accounts plugin's own settings shape, stored at
+/// `Profile.settings[PluginID.cloudAccounts]` — moved off the core Profile by
+/// P1.5. Mirrors internal/profile's CloudAccountsSettings; keep in sync by
+/// hand. Only the Cloud Accounts feature decodes this namespace.
+struct CloudAccountsSettings: Codable, Equatable {
+    var showAllAccounts: Bool = false
+    var accounts: [AccountRef] = []
+}
+
+extension Profile {
+    /// Decodes this profile's cloud-accounts settings blob, or the zero value
+    /// (no scoping, showAllAccounts false) if absent or malformed — a reader
+    /// must never fail just because a profile hasn't set its scope yet.
+    var cloudAccountsSettings: CloudAccountsSettings {
+        guard let raw = settings?[PluginID.cloudAccounts],
+              let data = try? JSONEncoder().encode(raw),
+              let decoded = try? JSONDecoder().decode(CloudAccountsSettings.self, from: data)
+        else { return CloudAccountsSettings() }
+        return decoded
+    }
+}
+
+/// Native, locale-aware rendering for RFC3339 timestamps returned by the Go
+/// core. Parsing failures remain visible as their original wire value.
+enum AppTimestamp {
+    private static let fractionalParser: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let standardParser = ISO8601DateFormatter()
+
+    static func display(_ raw: String) -> String {
+        guard let date = fractionalParser.date(from: raw) ?? standardParser.date(from: raw) else { return raw }
+        return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
+    }
 }
 
 /// The JSON shape for `ezcloud profile migrate`.
@@ -197,6 +247,19 @@ struct LaunchTemplateData: Codable {
 struct ApplyResponse: Codable {
     let newVersion: Int64
     let setDefault: Bool
+}
+
+// MARK: - Test Connection (`ezcloud check`, P1.5)
+
+/// The outcome of `ezcloud check` — a vendor-CLI identity/liveness call for
+/// one credential-entry profile. `identity` is present only when `ok`;
+/// `error` only when not. A provider that doesn't support Test Connection
+/// yet (currently: azure) reports this same shape with ok=false, not a CLI
+/// failure — the UI renders it identically to any other failed check.
+struct CheckResult: Codable {
+    let ok: Bool
+    let identity: [String: String]?
+    let error: String?
 }
 
 // MARK: - Plugin host (platform v2.0, docs/PLATFORM.md phase P1)

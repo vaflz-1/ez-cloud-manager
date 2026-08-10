@@ -98,6 +98,17 @@ func List(root string) ([]ProfileSummary, error) {
 		if !ok || entry.IsDir() || name == "" {
 			continue
 		}
+		// Delete() leaves a "config_<name>.bak.<timestamp>" backup alongside
+		// the real file (see backupStamp below) — cutting the "config_"
+		// prefix alone would let that backup through as if it were a live
+		// configuration named "<name>.bak.<timestamp>". nameRe (gcloud's own
+		// naming rule, already trusted by Activate/Delete) rejects it since
+		// the timestamp suffix contains dots — reusing it here is a single
+		// guard against backups AND any other stray file in the directory,
+		// not a special case for ".bak." specifically.
+		if !nameRe.MatchString(name) {
+			continue
+		}
 		fields, err := readConfig(root, name)
 		if err != nil {
 			continue // unreadable file: skip rather than fail the whole list

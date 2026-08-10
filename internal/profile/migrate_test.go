@@ -55,8 +55,9 @@ func TestMigrateCreatesOneProfilePerWorkspace(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected an acme-prod profile, got %+v", list)
 	}
-	if len(prod.Accounts) != 1 || prod.Accounts[0] != (AccountRef{Provider: "aws", Account: "prod"}) {
-		t.Fatalf("accounts = %+v", prod.Accounts)
+	prodAccounts := GetCloudAccountsSettings(prod).Accounts
+	if len(prodAccounts) != 1 || prodAccounts[0] != (AccountRef{Provider: "aws", Account: "prod"}) {
+		t.Fatalf("accounts = %+v", prodAccounts)
 	}
 }
 
@@ -109,7 +110,7 @@ func TestMigrateFreshInstallCreatesDefaultProfile(t *testing.T) {
 	if len(list) != 1 || list[0].Name != "Default" {
 		t.Fatalf("expected a single Default profile, got %+v", list)
 	}
-	if !list[0].ShowAllAccounts {
+	if !GetCloudAccountsSettings(list[0]).ShowAllAccounts {
 		t.Fatal("Default profile should show all accounts")
 	}
 }

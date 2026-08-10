@@ -52,6 +52,15 @@ extension CloudAccountsWindowController {
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier.rawValue {
+        case "scope":
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Scope"
+            item.toolTip = "Choose which accounts this profile shows"
+            item.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Scope")
+            item.target = self
+            item.action = #selector(openScopeSheet)
+            item.isBordered = true
+            return item
         case "refresh":
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Refresh"
@@ -66,7 +75,7 @@ extension CloudAccountsWindowController {
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .flexibleSpace, .init("refresh")]
+        [.toggleSidebar, .flexibleSpace, .init("scope"), .init("refresh")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -115,7 +124,7 @@ extension CloudAccountsWindowController {
         view.translatesAutoresizingMaskIntoConstraints = false
 
         profileSearchField = NSSearchField()
-        profileSearchField.placeholderString = "Search profiles"
+        profileSearchField.placeholderString = "Search accounts"
         profileSearchField.delegate = self
         profileSearchField.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(profileSearchField)
@@ -133,7 +142,7 @@ extension CloudAccountsWindowController {
         profilesTable.intercellSpacing = NSSize(width: 0, height: 2)
         profilesTable.floatsGroupRows = false
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("profile"))
-        col.title = "Profile"
+        col.title = "Account"
         col.width = 230
         profilesTable.addTableColumn(col)
 
@@ -146,8 +155,8 @@ extension CloudAccountsWindowController {
 
         addRemoveControl = NSSegmentedControl(
             images: [
-                NSImage(systemSymbolName: "plus", accessibilityDescription: "Add profile")!,
-                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete profile")!
+                NSImage(systemSymbolName: "plus", accessibilityDescription: "Add account")!,
+                NSImage(systemSymbolName: "minus", accessibilityDescription: "Delete account")!
             ],
             trackingMode: .momentary,
             target: self,
@@ -183,260 +192,17 @@ extension CloudAccountsWindowController {
         return button
     }
 
-    /// A rounded, hairline-bordered "card" (NSBox tracks appearance automatically).
-    /// Add content to `.contentView`; interior padding comes from contentViewMargins.
-    func makeCard() -> NSBox {
-        let box = NSBox()
-        box.boxType = .custom
-        box.titlePosition = .noTitle
-        box.fillColor = .controlBackgroundColor
-        box.borderColor = .separatorColor
-        box.borderWidth = 1
-        box.cornerRadius = UI.cardRadius
-        box.contentViewMargins = NSSize(width: UI.cardPad, height: UI.cardPad)
-        box.translatesAutoresizingMaskIntoConstraints = false
-        return box
-    }
+    /// A rounded, hairline-bordered "card" — shared with Manage Profiles via
+    /// UI.makeCard(); kept as a thin same-name wrapper here so this file's
+    /// existing call sites (`makeCard()`, no `UI.` prefix) don't all need
+    /// touching.
+    func makeCard() -> NSBox { UI.makeCard() }
 
-    /// Uppercase, secondary section caption (System Settings / inspector style).
-    func sectionCaption(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
+    /// Uppercase, secondary section caption — shared with Manage Profiles via
+    /// UI.sectionCaption(_:); see makeCard()'s note above.
+    func sectionCaption(_ text: String) -> NSTextField { UI.sectionCaption(text) }
 
-    func buildDetail() -> NSView {
-        let view = NSView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-
-        // ── Card 1 · Profile name + provider ────────────────────────────────
-        let profileCard = makeCard()
-        view.addSubview(profileCard)
-        let c1 = profileCard.contentView!
-
-        // Leading accent stripe in the editing provider's brand color — ties
-        // the detail pane back to the sidebar's color coding at a glance.
-        profileCardStripe = NSView()
-        profileCardStripe.wantsLayer = true
-        profileCardStripe.layer?.cornerRadius = 1.5
-        profileCardStripe.translatesAutoresizingMaskIntoConstraints = false
-        c1.addSubview(profileCardStripe)
-
-        let nameLabel = sectionCaption("PROFILE")
-        c1.addSubview(nameLabel)
-
-        providerPopup = NSPopUpButton()
-        providerPopup.controlSize = .small
-        providerPopup.font = .systemFont(ofSize: 11)
-        providerPopup.target = self
-        providerPopup.action = #selector(providerPopupChanged(_:))
-        providerPopup.translatesAutoresizingMaskIntoConstraints = false
-        c1.addSubview(providerPopup)
-
-        profileModeLabel = NSTextField(labelWithString: "New profile")
-        profileModeLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        profileModeLabel.textColor = .secondaryLabelColor
-        profileModeLabel.translatesAutoresizingMaskIntoConstraints = false
-        c1.addSubview(profileModeLabel)
-
-        profileNameField = NSTextField()
-        profileNameField.placeholderString = "example-profile"
-        profileNameField.controlSize = .large
-        profileNameField.delegate = self
-        profileNameField.translatesAutoresizingMaskIntoConstraints = false
-        c1.addSubview(profileNameField)
-
-        // ── Card 2 · Paste block ────────────────────────────────────────────
-        let pasteCard = makeCard()
-        view.addSubview(pasteCard)
-        let c2 = pasteCard.contentView!
-
-        pasteLabel = sectionCaption("PASTE AWS CREDENTIALS OR CONFIG")
-        c2.addSubview(pasteLabel)
-
-        let importButton = roundedButton(title: "Import File…", systemImage: "square.and.arrow.down", action: #selector(importFromFile))
-        importButton.controlSize = .small
-        importButton.font = .systemFont(ofSize: 11)
-        importButton.translatesAutoresizingMaskIntoConstraints = false
-        c2.addSubview(importButton)
-
-        let pasteScroll = NSScrollView()
-        pasteScroll.hasVerticalScroller = true
-        pasteScroll.borderType = .noBorder
-        pasteScroll.drawsBackground = false
-        pasteScroll.translatesAutoresizingMaskIntoConstraints = false
-        pasteView = NSTextView()
-        pasteView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        pasteView.textContainerInset = NSSize(width: 4, height: 6)
-        pasteView.drawsBackground = false
-        pasteView.delegate = self
-        pasteScroll.documentView = pasteView
-        c2.addSubview(pasteScroll)
-
-        // ── Card 3 · Variables ──────────────────────────────────────────────
-        let varsCard = makeCard()
-        view.addSubview(varsCard)
-        let c3 = varsCard.contentView!
-
-        variablesTitleLabel = sectionCaption("VARIABLES")
-        c3.addSubview(variablesTitleLabel)
-
-        variablesSummaryLabel = NSTextField(labelWithString: "No profile variables loaded")
-        variablesSummaryLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        variablesSummaryLabel.textColor = .tertiaryLabelColor
-        variablesSummaryLabel.translatesAutoresizingMaskIntoConstraints = false
-        c3.addSubview(variablesSummaryLabel)
-
-        fieldsTable = NSTableView()
-        fieldsTable.delegate = self
-        fieldsTable.dataSource = self
-        fieldsTable.usesAlternatingRowBackgroundColors = false
-        fieldsTable.gridStyleMask = []
-        fieldsTable.style = .inset
-        fieldsTable.rowHeight = UI.rowHeight
-        fieldsTable.intercellSpacing = NSSize(width: 0, height: 0)
-        fieldsTable.selectionHighlightStyle = .regular
-        fieldsTable.floatsGroupRows = false
-        fieldsTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        fieldsTable.allowsColumnResizing = false
-        fieldsTable.allowsColumnSelection = false
-        fieldsTable.backgroundColor = .clear
-
-        let keyCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("key"))
-        keyCol.title = "Variable"
-        keyCol.width = 230
-        let valueCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("value"))
-        valueCol.title = "Value"
-        valueCol.width = 520
-        fieldsTable.addTableColumn(keyCol)
-        fieldsTable.addTableColumn(valueCol)
-
-        let fieldsScroll = NSScrollView()
-        fieldsScroll.hasVerticalScroller = true
-        fieldsScroll.borderType = .noBorder
-        fieldsScroll.drawsBackground = false
-        fieldsScroll.documentView = fieldsTable
-        fieldsScroll.translatesAutoresizingMaskIntoConstraints = false
-        c3.addSubview(fieldsScroll)
-
-        let addVariableButton = roundedButton(title: "Add", systemImage: "plus", action: #selector(addVariable))
-        let removeVariableButton = roundedButton(title: "Remove", systemImage: "minus", action: #selector(removeVariable))
-        let copyValueButton = roundedButton(title: "Copy value", systemImage: "doc.on.doc", action: #selector(copyFieldValue))
-        let compareButton = roundedButton(title: "Compare…", systemImage: "arrow.left.arrow.right", action: #selector(compareProfiles))
-
-        // Export is a pull-down: formats target the clipboard (concealed),
-        // "Save to File…" writes wherever the user picks.
-        exportButton = NSPopUpButton()
-        exportButton.pullsDown = true
-        exportButton.addItem(withTitle: "Export")
-        for (title, tag) in [("Copy as shell exports", 0), ("Copy as .env", 1), ("Copy as INI", 2), ("Copy as JSON", 3)] {
-            let item = NSMenuItem(title: title, action: #selector(exportTapped(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = tag
-            exportButton.menu?.addItem(item)
-        }
-        exportButton.menu?.addItem(.separator())
-        let saveToFile = NSMenuItem(title: "Save to File…", action: #selector(exportToFile), keyEquivalent: "")
-        saveToFile.target = self
-        exportButton.menu?.addItem(saveToFile)
-        exportButton.translatesAutoresizingMaskIntoConstraints = false
-
-        let editorButtons = NSStackView(views: [addVariableButton, removeVariableButton, copyValueButton, compareButton, exportButton])
-        editorButtons.orientation = .horizontal
-        editorButtons.spacing = 8
-        editorButtons.translatesAutoresizingMaskIntoConstraints = false
-        c3.addSubview(editorButtons)
-
-        // ── Footer · status + activate + primary action ─────────────────────
-        statusLabel = NSTextField(labelWithString: "Ready")
-        statusLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(statusLabel)
-
-        activateButton = NSButton(title: "Set Active", target: self, action: #selector(activateProfile))
-        activateButton.bezelStyle = .rounded
-        activateButton.controlSize = .large
-        activateButton.isHidden = true
-        activateButton.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(activateButton)
-
-        saveButton = NSButton(title: "Save Profile", target: self, action: #selector(saveProfile))
-        saveButton.bezelStyle = .push
-        saveButton.controlSize = .large
-        saveButton.keyEquivalent = "\r"
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(saveButton)
-
-        NSLayoutConstraint.activate([
-            // Card 1 — Profile
-            profileCard.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: UI.pad),
-            profileCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
-            profileCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
-            profileCardStripe.leadingAnchor.constraint(equalTo: c1.leadingAnchor, constant: -UI.cardPad + 4),
-            profileCardStripe.topAnchor.constraint(equalTo: c1.topAnchor, constant: -4),
-            profileCardStripe.bottomAnchor.constraint(equalTo: c1.bottomAnchor, constant: 4),
-            profileCardStripe.widthAnchor.constraint(equalToConstant: 3),
-            nameLabel.topAnchor.constraint(equalTo: c1.topAnchor),
-            nameLabel.leadingAnchor.constraint(equalTo: c1.leadingAnchor),
-            providerPopup.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            providerPopup.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 10),
-            profileModeLabel.centerYAnchor.constraint(equalTo: nameLabel.centerYAnchor),
-            profileModeLabel.trailingAnchor.constraint(equalTo: c1.trailingAnchor),
-            profileModeLabel.leadingAnchor.constraint(greaterThanOrEqualTo: providerPopup.trailingAnchor, constant: 12),
-            profileNameField.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: UI.labelGap),
-            profileNameField.leadingAnchor.constraint(equalTo: c1.leadingAnchor),
-            profileNameField.trailingAnchor.constraint(equalTo: c1.trailingAnchor),
-            profileNameField.bottomAnchor.constraint(equalTo: c1.bottomAnchor),
-
-            // Card 2 — Paste
-            pasteCard.topAnchor.constraint(equalTo: profileCard.bottomAnchor, constant: UI.gap),
-            pasteCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
-            pasteCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
-            pasteLabel.topAnchor.constraint(equalTo: c2.topAnchor),
-            pasteLabel.leadingAnchor.constraint(equalTo: c2.leadingAnchor),
-            importButton.centerYAnchor.constraint(equalTo: pasteLabel.centerYAnchor),
-            importButton.trailingAnchor.constraint(equalTo: c2.trailingAnchor),
-            pasteScroll.topAnchor.constraint(equalTo: pasteLabel.bottomAnchor, constant: UI.labelGap),
-            pasteScroll.leadingAnchor.constraint(equalTo: c2.leadingAnchor),
-            pasteScroll.trailingAnchor.constraint(equalTo: c2.trailingAnchor),
-            pasteScroll.bottomAnchor.constraint(equalTo: c2.bottomAnchor),
-            pasteScroll.heightAnchor.constraint(equalToConstant: 68),
-
-            // Card 3 — Variables
-            varsCard.topAnchor.constraint(equalTo: pasteCard.bottomAnchor, constant: UI.gap),
-            varsCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
-            varsCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
-            varsCard.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -UI.gap),
-            variablesTitleLabel.topAnchor.constraint(equalTo: c3.topAnchor),
-            variablesTitleLabel.leadingAnchor.constraint(equalTo: c3.leadingAnchor),
-            variablesSummaryLabel.leadingAnchor.constraint(equalTo: variablesTitleLabel.trailingAnchor, constant: 8),
-            variablesSummaryLabel.centerYAnchor.constraint(equalTo: variablesTitleLabel.centerYAnchor),
-            variablesSummaryLabel.trailingAnchor.constraint(lessThanOrEqualTo: c3.trailingAnchor),
-            fieldsScroll.topAnchor.constraint(equalTo: variablesTitleLabel.bottomAnchor, constant: 10),
-            fieldsScroll.leadingAnchor.constraint(equalTo: c3.leadingAnchor),
-            fieldsScroll.trailingAnchor.constraint(equalTo: c3.trailingAnchor),
-            fieldsScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
-            editorButtons.topAnchor.constraint(equalTo: fieldsScroll.bottomAnchor, constant: 12),
-            editorButtons.leadingAnchor.constraint(equalTo: c3.leadingAnchor),
-            editorButtons.trailingAnchor.constraint(lessThanOrEqualTo: c3.trailingAnchor),
-            editorButtons.bottomAnchor.constraint(equalTo: c3.bottomAnchor),
-
-            // Footer
-            saveButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -UI.pad),
-            saveButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -UI.pad),
-            saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 130),
-            activateButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -10),
-            activateButton.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
-            statusLabel.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: activateButton.leadingAnchor, constant: -12)
-        ])
-
-        clearDetailForNoSelection()
-        return view
-    }
+    // buildDetail() — the Cards 1-3 detail-pane builder — lives in
+    // CloudAccountsWindowController+DetailLayout.swift (split out to stay
+    // under the file-size budget).
 }

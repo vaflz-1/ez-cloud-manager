@@ -13,6 +13,8 @@ final class TransferWindowController: NSWindowController {
     private let service: CredentialsService
     private var profile: Profile
 
+    private var explainerLabel: NSTextField!
+    private var exportButton: NSButton!
     private var statusLabel: NSTextField!
 
     init(profile: Profile, service: CredentialsService) {
@@ -29,26 +31,29 @@ final class TransferWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func updateProfile(_ profile: Profile) {
+        self.profile = profile
+        renderProfile()
+    }
+
     private func buildWindow() {
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 220),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false)
-        win.title = "Transfer — \(profile.name)"
         win.center()
         self.window = win
 
         let content = NSView()
         win.contentView = content
 
-        let explainer = NSTextField(wrappingLabelWithString:
-            "Export “\(profile.name)” as a .ezprofile file to hand to another machine, or import a .ezprofile file as a new profile here.")
-        explainer.font = .systemFont(ofSize: 12)
-        explainer.textColor = .secondaryLabelColor
-        explainer.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(explainer)
+        explainerLabel = NSTextField(wrappingLabelWithString: "")
+        explainerLabel.font = .systemFont(ofSize: 12)
+        explainerLabel.textColor = .secondaryLabelColor
+        explainerLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(explainerLabel)
 
-        let exportButton = NSButton(title: "Export “\(profile.name)”…", target: self, action: #selector(exportTapped))
+        exportButton = NSButton(title: "", target: self, action: #selector(exportTapped))
         exportButton.bezelStyle = .rounded
         exportButton.controlSize = .large
         exportButton.translatesAutoresizingMaskIntoConstraints = false
@@ -68,11 +73,11 @@ final class TransferWindowController: NSWindowController {
         content.addSubview(statusLabel)
 
         NSLayoutConstraint.activate([
-            explainer.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            explainer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            explainer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            explainerLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            explainerLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            explainerLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
 
-            exportButton.topAnchor.constraint(equalTo: explainer.bottomAnchor, constant: 24),
+            exportButton.topAnchor.constraint(equalTo: explainerLabel.bottomAnchor, constant: 24),
             exportButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             exportButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
 
@@ -84,6 +89,13 @@ final class TransferWindowController: NSWindowController {
             statusLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)
         ])
+        renderProfile()
+    }
+
+    private func renderProfile() {
+        window?.title = "Transfer — \(profile.name)"
+        explainerLabel?.stringValue = "Export “\(profile.name)” as a .ezprofile file to hand to another machine, or import a .ezprofile file as a new profile here."
+        exportButton?.title = "Export “\(profile.name)”…"
     }
 
     @objc private func exportTapped() {

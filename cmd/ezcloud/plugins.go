@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"os"
+	"sort"
 
 	"ez-cloud-manager/internal/plugin"
 	"ez-cloud-manager/internal/profile"
@@ -15,12 +19,16 @@ type pluginDescriptorWithState struct {
 	Enabled bool `json:"enabled"`
 }
 
+type pluginUpdateRequest struct {
+	Changes map[string]bool `json:"changes"`
+}
+
 // pluginsCommand manages the plugin registry and per-profile enable state
 // (docs/PLATFORM.md phase P1). P1's registry is fixed (plugin.Builtins()) —
 // no install/remove yet, that's P2.
 func pluginsCommand(args []string) {
 	if len(args) < 1 {
-		fail(fmt.Errorf("usage: ezcloud plugins list [--profile ID] | enable --profile ID --id ID | disable --profile ID --id ID"))
+		fail(fmt.Errorf("usage: ezcloud plugins list [--profile ID] | update --profile ID < changes.json | enable --profile ID --id ID | disable --profile ID --id ID"))
 	}
 	root, err := profile.DefaultRoot()
 	if err != nil {
@@ -57,14 +65,43 @@ func pluginsCommand(args []string) {
 		setPluginEnabled(root, rest, true)
 	case "disable":
 		setPluginEnabled(root, rest, false)
+	case "update":
+		updatePlugins(root, rest)
 	default:
 		fail(fmt.Errorf("unknown plugins subcommand %q", sub))
 	}
 }
 
-// setPluginEnabled toggles one plugin id in a profile's EnabledPlugins and
-// returns the whole updated Profile, so the Swift hub can post
-// .profileDidChange with it exactly like any other whole-object save.
+// updatePlugins applies a complete batch of requested enable/disable changes
+// in one profile write and records one redacted audit event for the batch.
+func updatePlugins(root string, args []string) {
+	fs := flag.NewFlagSet("plugins update", flag.ExitOnError)
+	profileID := fs.String("profile", "", "profile id")
+	output := fs.String("output", "json", "output format (json only)")
+	_ = fs.Parse(args)
+	requireJSONOutput(*output, "plugins update")
+	if *profileID == "" {
+		fail(fmt.Errorf("--profile is required"))
+	}
+
+	var req pluginUpdateRequest
+	if err := json.NewDecoder(io.LimitReader(os.Stdin, maxStdinBytes)).Decode(&req); err != nil {
+		fail(fmt.Errorf("read plugin changes json: %w", err))
+	}
+	if len(req.Changes) == 0 {
+		fail(fmt.Errorf("changes must include at least one plugin"))
+	}
+
+	saved, changedIDs, err := applyPluginChanges(root, *profileID, req.Changes)
+	if err != nil {
+		fail(err)
+	}
+	auditRecordKeys("plugins-update", "", saved.Name, changedIDs)
+	writeJSON(saved)
+}
+
+// setPluginEnabled keeps the legacy single-plugin CLI surface while routing
+// its mutation through the same targeted batch path as `plugins update`.
 func setPluginEnabled(root string, args []string, enabled bool) {
 	fs := flag.NewFlagSet("plugins enable/disable", flag.ExitOnError)
 	profileID := fs.String("profile", "", "profile id")
@@ -75,19 +112,8 @@ func setPluginEnabled(root string, args []string, enabled bool) {
 	if *profileID == "" || *pluginID == "" {
 		fail(fmt.Errorf("--profile and --id are required"))
 	}
-	if _, ok := plugin.ByID(*pluginID); !ok {
-		fail(fmt.Errorf("unknown plugin %q", *pluginID))
-	}
 
-	p, err := profile.Get(root, *profileID)
-	if err != nil {
-		fail(err)
-	}
-	p.EnabledPlugins = toggled(p.EnabledPlugins, *pluginID, enabled)
-	if err := profile.Save(root, p); err != nil {
-		fail(err)
-	}
-	saved, err := profile.Get(root, *profileID)
+	saved, _, err := applyPluginChanges(root, *profileID, map[string]bool{*pluginID: enabled})
 	if err != nil {
 		fail(err)
 	}
@@ -99,22 +125,23 @@ func setPluginEnabled(root string, args []string, enabled bool) {
 	writeJSON(saved)
 }
 
-// toggled returns ids with pluginID added (enabled) or removed (!enabled),
-// never duplicated.
-func toggled(ids []string, pluginID string, enabled bool) []string {
-	out := make([]string, 0, len(ids)+1)
-	found := false
-	for _, id := range ids {
-		if id == pluginID {
-			found = true
-			if !enabled {
-				continue
-			}
+// applyPluginChanges validates the entire request before mutation, then hands
+// the batch to internal/profile's targeted writer. Existing ids unknown to
+// this build remain in the list; only ids explicitly present in changes are
+// touched.
+func applyPluginChanges(root, profileID string, changes map[string]bool) (profile.Profile, []string, error) {
+	ids := make([]string, 0, len(changes))
+	for id := range changes {
+		if _, ok := plugin.ByID(id); !ok {
+			return profile.Profile{}, nil, fmt.Errorf("unknown plugin %q", id)
 		}
-		out = append(out, id)
+		ids = append(ids, id)
 	}
-	if enabled && !found {
-		out = append(out, pluginID)
+	sort.Strings(ids)
+
+	saved, err := profile.UpdateEnabledPlugins(root, profileID, changes)
+	if err != nil {
+		return profile.Profile{}, nil, err
 	}
-	return out
+	return saved, ids, nil
 }

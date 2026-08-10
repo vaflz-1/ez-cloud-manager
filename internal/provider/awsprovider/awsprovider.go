@@ -7,7 +7,14 @@
 package awsprovider
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"ez-cloud-manager/internal/awscreds"
 	"ez-cloud-manager/internal/provider"
@@ -124,5 +131,55 @@ func (p awsProvider) Activate(path, name string) error {
 }
 
 func (awsProvider) ActivateLabel() string { return "Copy to [default] profile" }
+
+// Check runs `aws sts get-caller-identity` for the named profile — the
+// standard vendor-CLI liveness call, requiring no permissions beyond
+// identifying the caller. path is the credentials file (see
+// awscreds.DefaultPath); AWS_SHARED_CREDENTIALS_FILE scopes the aws CLI to
+// it without touching the user's real ~/.aws/credentials. A missing aws
+// binary or a failed call is reported via CheckResult, never a Go error —
+// this call's own error return is reserved for something that prevented it
+// from even attempting the check.
+func (awsProvider) Check(ctx context.Context, path, name string) (provider.CheckResult, error) {
+	bin, err := exec.LookPath("aws")
+	if err != nil {
+		return provider.CheckResult{OK: false, Error: "AWS CLI (aws) not found in PATH"}, nil
+	}
+
+	cmd := exec.CommandContext(ctx, bin, "sts", "get-caller-identity", "--profile", name, "--output", "json")
+	cmd.Env = append(os.Environ(), "AWS_SHARED_CREDENTIALS_FILE="+path)
+	// If aws is (or wraps, e.g. a credential-process/SSO shell script) a
+	// process that spawns a child of its own, killing aws alone on ctx
+	// expiry is not enough: the orphaned grandchild can still hold the
+	// stdout/stderr pipes open, and cmd.Wait would otherwise block on that
+	// pipe's EOF until the grandchild exits on its own — silently defeating
+	// the timeout. WaitDelay bounds that: past this grace period after
+	// Cancel, exec force-closes the pipes so Wait returns promptly.
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			msg = "timed out waiting for aws sts get-caller-identity"
+		} else if msg == "" {
+			msg = err.Error()
+		}
+		return provider.CheckResult{OK: false, Error: msg}, nil
+	}
+
+	var identity struct {
+		Account string
+		Arn     string
+		UserId  string
+	}
+	_ = json.Unmarshal(stdout.Bytes(), &identity)
+	return provider.CheckResult{OK: true, Identity: map[string]string{
+		"account": identity.Account,
+		"arn":     identity.Arn,
+		"userId":  identity.UserId,
+	}}, nil
+}
 
 func init() { provider.Register(New()) }

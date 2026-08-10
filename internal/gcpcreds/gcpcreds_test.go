@@ -119,6 +119,44 @@ func TestActivateAndDeleteGuard(t *testing.T) {
 	}
 }
 
+// TestListExcludesDeleteBackups guards against a real bug found in review:
+// Delete leaves a "config_<name>.bak.<timestamp>" file next to the real
+// configs (see TestActivateAndDeleteGuard above), and List's old prefix-cut
+// logic let that backup through as if it were an ordinary, selectable
+// configuration named "<name>.bak.<timestamp>" — including in the guided
+// gcloud-delete picker, where picking it would Activate a bogus name. List
+// must only ever return names that satisfy nameRe (gcloud's own naming
+// rule), which backup timestamps never do.
+func TestListExcludesDeleteBackups(t *testing.T) {
+	root := t.TempDir()
+	if err := Save(root, "keep", map[string]string{KeyProject: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, "gone", map[string]string{KeyProject: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete(root, "gone"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "configurations", "config_gone.bak.*"))
+	if len(matches) == 0 {
+		t.Fatal("expected a backup file on disk to test against")
+	}
+
+	profiles, err := List(root)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, p := range profiles {
+		if strings.Contains(p.Name, ".bak.") {
+			t.Fatalf("List returned a backup file as a configuration: %+v", profiles)
+		}
+	}
+	if len(profiles) != 1 || profiles[0].Name != "keep" {
+		t.Fatalf("profiles = %+v, want only [keep]", profiles)
+	}
+}
+
 func TestParseGcloudConfigList(t *testing.T) {
 	text := `[core]
 account = me@example.com

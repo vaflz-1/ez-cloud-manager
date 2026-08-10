@@ -1,6 +1,6 @@
 # EZ Cloud Manager v2.0 — Platform Architecture
 
-Status: **design accepted, pre-implementation** (July 2026).
+Status: **design accepted; P0–P1 implemented, P2–P5 planned** (August 2026).
 Supersedes the monolith model of v1.x; v1.2–v1.4 roadmap items become
 *plugins* on this platform instead of core features.
 
@@ -53,7 +53,7 @@ Goals, in the user's words:
 
 | Area | Contents |
 |---|---|
-| Profile engine | Global profiles: accounts/creds refs, env vars, enabled plugins, settings; multi-window (one window ⇄ one profile) |
+| Profile engine | Global profiles: name, env vars, enabled plugin ids, opaque per-plugin settings, window state; multi-window (one window ⇄ one profile) |
 | Provider base | The 3 cloud adapters (aws/gcp/az CLI detection, auth/session state) — *rails*, no features |
 | Plugin host | Manifest loader, contribution registry, declarative-view renderer, JSON-RPC runtime, hot reload |
 | Settings | Light-IDE-style settings window; per-profile overrides |
@@ -70,6 +70,15 @@ plugin. First-party seed plugins (installed by default, removable):
 `env-projects` (.env profiles) · `secrets-browser` (SSM/Secret
 Manager/Key Vault).
 
+Profile mutations follow the same ownership boundary: the core editor
+updates only `name`/`envVars`, the catalog patches enabled plugin ids in one
+Apply, and a plugin can replace only its own settings namespace. The Go core
+assigns `updatedAt` after each successful persisted mutation; `savedAt`
+changes only for an explicit core-profile save/rename and is the timestamp the
+Profile Manager shows. Core saves compare the editor's original name/env
+snapshot before writing, while a root-wide lock protects unique names and the
+"at least one profile" invariant across concurrent processes.
+
 ## Plugin runtime — two tiers
 
 ### Tier 1: Declarative plugins (the default, AI-first)
@@ -81,10 +90,12 @@ This is the tier any LLM can write; it is sandbox-safe by construction.
 
 ### Tier 2: Native plugins (escape hatch)
 
-A separate executable speaking **JSON-RPC 2.0 over stdio** (HashiCorp
-go-plugin / LSP pattern — no dylib loading, works with Go and anything
-else). Handshake declares protocol version; core supervises the process
-per profile. Required only for logic that can't be expressed
+A separate executable speaking **JSON-RPC 2.0 over stdio** (a
+language-neutral, LSP-style process boundary — not HashiCorp go-plugin,
+which uses a different protocol stack). No dylib loading is required, and
+the runtime works with Go or any other language. A handshake declares the
+protocol version; core supervises the process per profile. Required only
+for logic that can't be expressed
 declaratively (streaming, computation, custom protocols).
 
 ## Manifest & contribution points

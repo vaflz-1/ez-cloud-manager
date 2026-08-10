@@ -52,6 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: .manageProfilesRequested, object: nil, queue: .main) { [weak self] _ in
             self?.manageProfiles()
         }
+        NotificationCenter.default.addObserver(forName: .profileSwitchRequested, object: nil, queue: .main) { [weak self] note in
+            guard let request = note.object as? ProfileSwitchRequest else { return }
+            self?.handleProfileSwitchRequest(request)
+        }
+        NotificationCenter.default.addObserver(forName: .profileListDidChange, object: nil, queue: .main) { [weak self] note in
+            guard let change = note.object as? ProfileListChange else { return }
+            self?.handleProfileListChange(change)
+        }
 
         openMostRecentOrDefaultProfile()
         NSApp.activate(ignoringOtherApps: true)
@@ -93,6 +101,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func newWindowForProfile(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         openWindow(forProfile: id)
+    }
+
+    /// The Hub's profile switcher asked to move to a different profile. If
+    /// that profile ALREADY has its own open window, refocus it and snap the
+    /// requesting window's popup back — two windows must never end up bound
+    /// to the same profile (windowControllers stays keyed 1:1 by id). Only
+    /// when the target has no window yet does the requesting window rebind
+    /// to it in place (same NSWindow, new profile/env/plugins/title).
+    private func handleProfileSwitchRequest(_ request: ProfileSwitchRequest) {
+        if let existing = windowControllers[request.targetProfileID], existing !== request.from {
+            existing.show()
+            request.from.revertProfilePopupSelection()
+            return
+        }
+        guard let newProfile = try? service.getProfile(id: request.targetProfileID) else {
+            showError("That profile could not be loaded.")
+            request.from.revertProfilePopupSelection()
+            return
+        }
+        if let oldID = windowControllers.first(where: { $0.value === request.from })?.key {
+            windowControllers.removeValue(forKey: oldID)
+        }
+        request.from.rebind(to: newProfile)
+        windowControllers[request.targetProfileID] = request.from
+    }
+
+    /// A deleted profile must not leave a live Hub or addon session behind.
+    /// Removing the exact dictionary entry before closing makes the
+    /// `.profileWindowWillClose` callback harmlessly idempotent.
+    private func handleProfileListChange(_ change: ProfileListChange) {
+        guard change.mutation == .deleted,
+              let controller = windowControllers.removeValue(forKey: change.profileID)
+        else { return }
+        controller.closeAfterProfileDeletion()
     }
 
     @objc func manageProfiles() {

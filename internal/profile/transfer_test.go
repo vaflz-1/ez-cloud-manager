@@ -11,7 +11,7 @@ func TestExportImportRoundtrip(t *testing.T) {
 	srcRoot := tmpRoot(t)
 	src := mustCreate(t, srcRoot, Profile{
 		Name:     "prod",
-		Accounts: []AccountRef{{Provider: "aws", Account: "default"}},
+		Settings: cloudAccountsSettingsJSON(t, CloudAccountsSettings{Accounts: []AccountRef{{Provider: "aws", Account: "default"}}}),
 		EnvVars:  []EnvVar{{Key: "REGION", Value: "us-east-1"}},
 	})
 
@@ -31,8 +31,10 @@ func TestExportImportRoundtrip(t *testing.T) {
 	if imported.ID == src.ID {
 		t.Fatal("import must assign a fresh id, not reuse the exported one")
 	}
-	if len(imported.Accounts) != 1 || imported.Accounts[0] != src.Accounts[0] {
-		t.Fatalf("accounts not preserved: %+v", imported.Accounts)
+	srcAccounts := GetCloudAccountsSettings(src).Accounts
+	importedAccounts := GetCloudAccountsSettings(imported).Accounts
+	if len(importedAccounts) != 1 || importedAccounts[0] != srcAccounts[0] {
+		t.Fatalf("accounts not preserved: %+v", importedAccounts)
 	}
 	if len(imported.EnvVars) != 1 || imported.EnvVars[0] != src.EnvVars[0] {
 		t.Fatalf("env vars not preserved: %+v", imported.EnvVars)
@@ -42,9 +44,9 @@ func TestExportImportRoundtrip(t *testing.T) {
 func TestExportImportPreservesShowAllAccountsAndEnabledPlugins(t *testing.T) {
 	srcRoot := tmpRoot(t)
 	src := mustCreate(t, srcRoot, Profile{
-		Name:            "everything",
-		ShowAllAccounts: true,
-		EnabledPlugins:  []string{"ec2-launch-templates"},
+		Name:           "everything",
+		Settings:       cloudAccountsSettingsJSON(t, CloudAccountsSettings{ShowAllAccounts: true}),
+		EnabledPlugins: []string{"ec2-launch-templates"},
 	})
 
 	var buf bytes.Buffer
@@ -57,7 +59,7 @@ func TestExportImportPreservesShowAllAccountsAndEnabledPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if !imported.ShowAllAccounts {
+	if !GetCloudAccountsSettings(imported).ShowAllAccounts {
 		t.Fatal("showAllAccounts should survive export/import")
 	}
 	if len(imported.EnabledPlugins) != 1 || imported.EnabledPlugins[0] != "ec2-launch-templates" {

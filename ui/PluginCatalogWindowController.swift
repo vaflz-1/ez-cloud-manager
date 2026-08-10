@@ -2,22 +2,18 @@ import AppKit
 
 /// The "Add Plugins" catalog sheet — every registered plugin
 /// (internal/plugin.Builtins, unfiltered) with a switch reflecting whether
-/// THIS profile has it enabled. Toggling calls `ezcloud plugins
-/// enable|disable` immediately (no separate "Apply"); success reloads this
-/// sheet, calls `onChange` so the Hub's grid catches up, and posts
-/// `.profileDidChange` so any OTHER open window on the same profile
-/// (Profile Manager, another Hub) refreshes too — reusing P0's existing
-/// cross-window notification exactly as ProfileManagerWindowController's
-/// saveDetail() already does.
+/// THIS profile has it enabled. Switches edit a local draft; Apply sends one
+/// bulk patch, causing one profile write and one updatedAt change regardless
+/// of how many addons were toggled.
 final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let service: CredentialsService
     private let profileID: String
     private var descriptors: [PluginDescriptor] = []
+    private var baselineEnabled: Set<String> = []
+    private var draftEnabled: Set<String> = []
     private var table: NSTableView!
-
-    /// Called after any successful enable/disable — lets the Hub refresh its
-    /// grid without a direct reference back into this window.
-    var onChange: (() -> Void)?
+    private var statusLabel: NSTextField!
+    private var applyButton: NSButton!
 
     init(service: CredentialsService, profileID: String) {
         self.service = service
@@ -37,8 +33,25 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
     }
 
     private func reload() {
-        descriptors = (try? service.listPlugins(profileID: profileID)) ?? []
-        table.reloadData()
+        do {
+            descriptors = try service.listPlugins(profileID: profileID)
+            baselineEnabled = Set(descriptors.filter(\.enabled).map(\.id))
+            draftEnabled = baselineEnabled
+            table.reloadData()
+            updateApplyButton()
+            if let profile = try? service.getProfile(id: profileID) {
+                statusLabel.stringValue = "Last updated \(AppTimestamp.display(profile.updatedAt))"
+            } else {
+                statusLabel.stringValue = "Ready"
+            }
+        } catch {
+            descriptors = []
+            baselineEnabled = []
+            draftEnabled = []
+            table.reloadData()
+            updateApplyButton()
+            statusLabel.stringValue = "Error: \(error.localizedDescription)"
+        }
     }
 
     private func buildWindow() {
@@ -67,20 +80,38 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         scroll.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(scroll)
 
-        let doneButton = NSButton(title: "Done", target: self, action: #selector(dismiss))
-        doneButton.bezelStyle = .rounded
-        doneButton.keyEquivalent = "\r"
-        doneButton.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(doneButton)
+        statusLabel = NSTextField(labelWithString: "Ready")
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(statusLabel)
+
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(dismiss))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(cancelButton)
+
+        applyButton = NSButton(title: "Apply", target: self, action: #selector(applyChanges))
+        applyButton.bezelStyle = .rounded
+        applyButton.keyEquivalent = "\r"
+        applyButton.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(applyButton)
 
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            scroll.bottomAnchor.constraint(equalTo: doneButton.topAnchor, constant: -12),
+            scroll.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
 
-            doneButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            doneButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
+            statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            statusLabel.centerYAnchor.constraint(equalTo: applyButton.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: cancelButton.leadingAnchor, constant: -12),
+            cancelButton.trailingAnchor.constraint(equalTo: applyButton.leadingAnchor, constant: -8),
+            cancelButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            applyButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            applyButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
         ])
     }
 
@@ -98,7 +129,7 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         let id = NSUserInterfaceItemIdentifier("pluginRow")
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? PluginRowView)
             ?? PluginRowView(reuseIdentifier: id, target: self, action: #selector(toggled(_:)))
-        cell.configure(descriptors[row], row: row)
+        cell.configure(descriptors[row], row: row, enabled: draftEnabled.contains(descriptors[row].id))
         return cell
     }
 
@@ -106,22 +137,38 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         let row = sender.tag
         guard row >= 0, row < descriptors.count else { return }
         let plugin = descriptors[row]
-        let enable = sender.state == .on
-        service.runAsync({
-            if enable {
-                return try self.service.enablePlugin(profileID: self.profileID, pluginID: plugin.id)
-            } else {
-                return try self.service.disablePlugin(profileID: self.profileID, pluginID: plugin.id)
-            }
-        }) { [weak self] result in
+        if sender.state == .on {
+            draftEnabled.insert(plugin.id)
+        } else {
+            draftEnabled.remove(plugin.id)
+        }
+        updateApplyButton()
+        statusLabel.stringValue = "Unsaved plugin changes"
+    }
+
+    private func updateApplyButton() {
+        applyButton?.isEnabled = draftEnabled != baselineEnabled
+        window?.isDocumentEdited = draftEnabled != baselineEnabled
+    }
+
+    @objc private func applyChanges() {
+        let changedIDs = baselineEnabled.symmetricDifference(draftEnabled)
+        guard !changedIDs.isEmpty else { return }
+        let submitted = draftEnabled
+        let changes = Dictionary(uniqueKeysWithValues: changedIDs.map { ($0, submitted.contains($0)) })
+        applyButton.isEnabled = false
+        statusLabel.stringValue = "Saving…"
+        service.runAsync({ try self.service.updatePlugins(profileID: self.profileID, changes: changes) }) { [weak self] result in
             guard let self else { return }
             switch result {
-            case .success:
-                self.reload()
-                self.onChange?()
+            case .success(let saved):
+                self.baselineEnabled = submitted
+                self.updateApplyButton()
+                self.statusLabel.stringValue = "Saved \(AppTimestamp.display(saved.updatedAt))"
                 NotificationCenter.default.post(name: .profileDidChange, object: self.profileID)
             case .failure(let error):
-                sender.state = enable ? .off : .on // revert the switch
+                self.updateApplyButton()
+                self.statusLabel.stringValue = "Save failed"
                 let alert = NSAlert()
                 alert.messageText = "Add Plugins"
                 alert.informativeText = error.localizedDescription
@@ -185,7 +232,7 @@ final class PluginRowView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(_ plugin: PluginDescriptor, row: Int) {
+    func configure(_ plugin: PluginDescriptor, row: Int, enabled: Bool) {
         let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
         iconView.image = NSImage(systemSymbolName: plugin.icon, accessibilityDescription: plugin.name)?
             .withSymbolConfiguration(cfg)
@@ -194,6 +241,6 @@ final class PluginRowView: NSTableCellView {
         descriptionLabel.stringValue = plugin.description
         pillView.image = PluginStyle.pill(plugin.category)
         toggle.tag = row
-        toggle.state = plugin.enabled ? .on : .off
+        toggle.state = enabled ? .on : .off
     }
 }

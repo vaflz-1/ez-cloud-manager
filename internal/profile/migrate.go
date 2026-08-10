@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -21,9 +22,9 @@ const migratedMarker = ".migrated"
 // per legacy Workspace not already present by name.
 //
 // If the result would be zero profiles (fresh install, or an empty/absent
-// legacy file), it creates a single "Default" profile with ShowAllAccounts
-// set, so the app is never left without one: every window must bind to
-// exactly one profile.
+// legacy file), it creates a single "Default" profile with the cloud-accounts
+// plugin's ShowAllAccounts settings blob set, so the app is never left
+// without one: every window must bind to exactly one profile.
 func MigrateFromWorkspaces(root string) (int, error) {
 	markerPath := filepath.Join(root, migratedMarker)
 	if _, err := os.Stat(markerPath); err == nil {
@@ -61,8 +62,18 @@ func MigrateFromWorkspaces(root string) (int, error) {
 		// would get an empty Hub despite having real, already-configured
 		// accounts. The "zero profiles" fallback below stays untouched — a
 		// truly fresh install (no legacy workspace at all) still gets the
-		// empty-skeleton Default profile P1 intends.
-		created, err := Create(root, Profile{Name: w.Name, Accounts: accounts, EnabledPlugins: []string{plugin.CloudAccountsID}})
+		// empty-skeleton Default profile P1 intends. Accounts land in the
+		// cloud-accounts plugin's own settings blob (P1.5), not a top-level
+		// Profile field.
+		blob, err := json.Marshal(CloudAccountsSettings{Accounts: accounts})
+		if err != nil {
+			return migrated, err
+		}
+		created, err := Create(root, Profile{
+			Name:           w.Name,
+			EnabledPlugins: []string{plugin.CloudAccountsID},
+			Settings:       map[string]json.RawMessage{plugin.CloudAccountsID: blob},
+		})
 		if err != nil {
 			return migrated, err
 		}
@@ -71,7 +82,14 @@ func MigrateFromWorkspaces(root string) (int, error) {
 	}
 
 	if len(existing) == 0 {
-		if _, err := Create(root, Profile{Name: "Default", ShowAllAccounts: true}); err != nil {
+		blob, err := json.Marshal(CloudAccountsSettings{ShowAllAccounts: true})
+		if err != nil {
+			return migrated, err
+		}
+		if _, err := Create(root, Profile{
+			Name:     "Default",
+			Settings: map[string]json.RawMessage{plugin.CloudAccountsID: blob},
+		}); err != nil {
 			return migrated, err
 		}
 		migrated++

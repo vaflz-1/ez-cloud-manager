@@ -20,9 +20,10 @@ extension CloudAccountsWindowController {
         reloadFieldsTable()
         syncProviderPopup()
         updatePasteLabel()
+        updatePasteViewPlaceholder()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(catalog.providerDisplayName(currentEditingProvider())) profile")
+        setStatus("New \(catalog.providerDisplayName(currentEditingProvider())) account")
     }
 
     @objc func providerPopupChanged(_ sender: NSPopUpButton) {
@@ -35,21 +36,34 @@ extension CloudAccountsWindowController {
         updatePasteLabel()
         updateVariablesSummary()
         updateProfileMode()
-        setStatus("New \(catalog.providerDisplayName(id)) profile")
+        setStatus("New \(catalog.providerDisplayName(id)) account")
     }
 
     @objc func deleteProfile() {
         let provider = currentEditingProvider()
         let name = selectedProfileName ?? profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            showError("Select a profile first.")
+            showError("Select an account first.")
+            return
+        }
+
+        // Pre-check: some providers (gcp today) refuse to delete their own
+        // active/default entry. Route straight to the guided sheet BEFORE
+        // even attempting the delete, rather than only reacting to the
+        // failure — docs/PLATFORM.md principle 6 (guided flows, not bare
+        // errors). The reactive catch below stays as a safety net for races
+        // (e.g. something else activated a different config between load
+        // and delete).
+        if catalog.providerInfo(provider)?.canActivate == true,
+           profilesByProvider[provider]?.first(where: { $0.name == name })?.isActive == true {
+            presentGuidedGcpDeleteSheet(name: name)
             return
         }
 
         let path = pathsByProvider[provider] ?? "the provider's store"
         let alert = NSAlert()
-        alert.messageText = "Delete \(catalog.providerDisplayName(provider)) profile?"
-        alert.informativeText = "Profile \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
+        alert.messageText = "Delete \(catalog.providerDisplayName(provider)) account?"
+        alert.informativeText = "Account \"\(name)\" will be removed from \(path). A timestamped backup is created before writing."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
@@ -63,6 +77,11 @@ extension CloudAccountsWindowController {
             clearDetailForNoSelection()
             setStatus("Deleted \(name)")
         } catch {
+            // Safety net for the pre-check above (see +GuidedDelete.swift).
+            if provider == "gcp", error.localizedDescription.contains("is the active gcloud configuration") {
+                presentGuidedGcpDeleteSheet(name: name)
+                return
+            }
             showError(error.localizedDescription)
         }
     }
@@ -169,7 +188,7 @@ extension CloudAccountsWindowController {
         let provider = currentEditingProvider()
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            showError("Profile name is required.")
+            showError("Account name is required.")
             return
         }
 
@@ -181,10 +200,6 @@ extension CloudAccountsWindowController {
 
         do {
             let wasExisting = profileExists(name, provider: provider)
-            if wasExisting, !confirmOverwrite(provider: provider, name: name, newFields: fields) {
-                setStatus("Save cancelled")
-                return
-            }
             try service.save(provider: provider, name, fields: fields, extraEnv: profile.envVars.asDictionary())
             let savedCount = fields.values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
             selectedProvider = provider
@@ -224,30 +239,6 @@ extension CloudAccountsWindowController {
         pasteboard.setString(text, forType: concealed)
     }
 
-    /// Shows a readable, grouped diff of what will change on an existing profile
-    /// and asks for confirmation. Returns true to proceed (or if nothing changed).
-    func confirmOverwrite(provider: String, name: String, newFields: [String: String]) -> Bool {
-        let current: [String: String]
-        do {
-            current = try service.get(provider: provider, name, extraEnv: profile.envVars.asDictionary()).fields
-        } catch {
-            return true // can't read current state; fall back to a plain save
-        }
-
-        let diff = diffGroups(old: current, new: newFields)
-        let total = diff.added.count + diff.changed.count + diff.removed.count
-        if total == 0 { return true }
-
-        let path = pathsByProvider[provider] ?? "disk"
-        let alert = NSAlert()
-        alert.messageText = "Save changes to “\(name)”?"
-        alert.informativeText = "\(total) change\(total == 1 ? "" : "s") to \(path) — a timestamped backup is written first."
-        alert.accessoryView = diffAccessoryView(diff)
-        alert.addButton(withTitle: "Save Changes")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
     typealias FieldDiff = (added: [(String, String)], changed: [(String, String, String)], removed: [String])
 
     /// Groups the field diff (secrets masked; empty new value = removed).
@@ -277,8 +268,8 @@ extension CloudAccountsWindowController {
         return (added, changed, removed)
     }
 
-    /// A scrollable, monospaced, color-coded diff view — reused by the save
-    /// confirmation, profile compare and Launch Template apply flows.
+    /// A scrollable, monospaced, color-coded diff view used by profile
+    /// compare (Launch Templates owns a separate diff renderer).
     func diffAccessoryView(_ diff: FieldDiff) -> NSView {
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let sectionFont = NSFont.systemFont(ofSize: 10, weight: .semibold)

@@ -8,6 +8,14 @@
 package gcpprovider
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
 	"ez-cloud-manager/internal/gcpcreds"
 	"ez-cloud-manager/internal/provider"
 )
@@ -30,9 +38,10 @@ func (gcpProvider) List(path string) ([]provider.ProfileSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	active := gcpcreds.ActiveName(path)
 	out := make([]provider.ProfileSummary, len(summaries))
 	for i, s := range summaries {
-		out[i] = provider.ProfileSummary{Name: s.Name, Keys: s.Keys}
+		out[i] = provider.ProfileSummary{Name: s.Name, Keys: s.Keys, Active: s.Name == active}
 	}
 	return out, nil
 }
@@ -83,5 +92,60 @@ func (gcpProvider) Activate(path, name string) error {
 }
 
 func (gcpProvider) ActivateLabel() string { return "Set as active gcloud configuration" }
+
+// Check runs `gcloud auth list` scoped to the named configuration via
+// CLOUDSDK_ACTIVE_CONFIG_NAME — gcloud's documented one-shot override for
+// which configuration a single invocation uses, WITHOUT touching the
+// on-disk active_config marker (unlike Activate). path is the CLOUDSDK_CONFIG
+// root (see gcpcreds.DefaultPath). A missing gcloud binary or a failed call
+// is reported via CheckResult, never a Go error.
+func (gcpProvider) Check(ctx context.Context, path, name string) (provider.CheckResult, error) {
+	bin, err := exec.LookPath("gcloud")
+	if err != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud CLI not found in PATH"}, nil
+	}
+
+	cmd := exec.CommandContext(ctx, bin, "auth", "list", "--format=json")
+	cmd.Env = append(os.Environ(), "CLOUDSDK_CONFIG="+path, "CLOUDSDK_ACTIVE_CONFIG_NAME="+name)
+	// See awsprovider.Check's identical field for why this is required, not
+	// optional: gcloud (or a wrapper script around it) spawning a child of
+	// its own means killing gcloud alone on ctx expiry can still leave
+	// cmd.Wait blocked on that orphaned child holding the output pipes open.
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			msg = "timed out waiting for gcloud auth list"
+		} else if msg == "" {
+			msg = err.Error()
+		}
+		return provider.CheckResult{OK: false, Error: msg}, nil
+	}
+
+	var accounts []struct {
+		Account string
+		Status  string
+	}
+	_ = json.Unmarshal(stdout.Bytes(), &accounts)
+	for _, a := range accounts {
+		if a.Status == "ACTIVE" {
+			identity := map[string]string{"account": a.Account}
+			// The project id comes from the STORED configuration's own
+			// fields, not a second live gcloud call — `gcloud auth list`
+			// doesn't carry it, and this configuration's file is already
+			// ours to read directly.
+			if stored, err := gcpcreds.Get(path, name); err == nil {
+				if proj := stored.Fields[gcpcreds.KeyProject]; proj != "" {
+					identity["project"] = proj
+				}
+			}
+			return provider.CheckResult{OK: true, Identity: identity}, nil
+		}
+	}
+	return provider.CheckResult{OK: false, Error: "no active/authenticated account for this configuration"}, nil
+}
 
 func init() { provider.Register(New()) }

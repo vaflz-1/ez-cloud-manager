@@ -103,6 +103,53 @@ func TestEnabledPluginsUnknownIDRoundTripsUnrejected(t *testing.T) {
 	}
 }
 
+func TestUpdateEnabledPluginsIsTargetedBatchSave(t *testing.T) {
+	root := tmpRoot(t)
+	created := mustCreate(t, root, Profile{
+		Name:           "a",
+		EnabledPlugins: []string{"some-future-plugin", plugin.TransferID},
+		Settings: map[string]json.RawMessage{
+			"some-future-plugin": json.RawMessage(`{"mode":"safe"}`),
+		},
+		WindowState: json.RawMessage(`{"selected":"catalog"}`),
+	})
+	created.UpdatedAt = "2000-01-01T00:00:00Z"
+	writeRawProfile(t, root, created)
+
+	saved, err := UpdateEnabledPlugins(root, created.ID, map[string]bool{
+		plugin.TransferID:        false,
+		plugin.CloudAccountsID:   true,
+		plugin.LaunchTemplatesID: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateEnabledPlugins: %v", err)
+	}
+	wantEnabled := []string{"some-future-plugin", plugin.CloudAccountsID, plugin.LaunchTemplatesID}
+	if len(saved.EnabledPlugins) != len(wantEnabled) {
+		t.Fatalf("enabledPlugins = %+v, want %+v", saved.EnabledPlugins, wantEnabled)
+	}
+	for i := range wantEnabled {
+		if saved.EnabledPlugins[i] != wantEnabled[i] {
+			t.Fatalf("enabledPlugins = %+v, want %+v", saved.EnabledPlugins, wantEnabled)
+		}
+	}
+	if saved.UpdatedAt == created.UpdatedAt || saved.UpdatedAt == "" {
+		t.Fatalf("updatedAt = %q, want a fresh batch-save timestamp", saved.UpdatedAt)
+	}
+	var settings struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(saved.Settings["some-future-plugin"], &settings); err != nil || settings.Mode != "safe" {
+		t.Fatalf("settings were clobbered: %s (%v)", saved.Settings["some-future-plugin"], err)
+	}
+	var state struct {
+		Selected string `json:"selected"`
+	}
+	if err := json.Unmarshal(saved.WindowState, &state); err != nil || state.Selected != "catalog" {
+		t.Fatalf("window state was clobbered: %s (%v)", saved.WindowState, err)
+	}
+}
+
 func TestEnabledPluginsPerProfileIndependence(t *testing.T) {
 	root := tmpRoot(t)
 	a := mustCreate(t, root, Profile{Name: "a", EnabledPlugins: []string{plugin.CloudAccountsID}})
@@ -157,28 +204,44 @@ func writeRawProfile(t *testing.T, root string, p Profile) {
 
 func TestLegacyVersionOneProfileAutoEnablesCloudAccountsInMemory(t *testing.T) {
 	root := tmpRoot(t)
-	writeRawProfile(t, root, Profile{
-		ID: "legacy0000000000000000000000000", Name: "legacy", Version: 1,
-		Accounts: []AccountRef{{Provider: "aws", Account: "prod"}},
-	})
+	id := "legacy0000000000000000000000000"
+	dir := filepath.Join(root, id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A genuine pre-P1.5 (here: pre-P1, Version 1) profile.json still has the
+	// old top-level "accounts" key that the current Profile struct no longer
+	// declares — write it by hand (json.Marshal(Profile{...}) can't produce
+	// it any more) so this test exercises BOTH legacy migration blocks in
+	// readProfile at once (Version<2 EnabledPlugins auto-enable AND Version<3
+	// accounts-into-settings folding), the combination Risk #1 in the P1.5
+	// plan calls out as worth covering together, not just in isolation.
+	raw := `{"id":"` + id + `","name":"legacy","version":1,"accounts":[{"provider":"aws","account":"prod"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	got, err := Get(root, "legacy0000000000000000000000000")
+	got, err := Get(root, id)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if len(got.EnabledPlugins) != 1 || got.EnabledPlugins[0] != plugin.CloudAccountsID {
 		t.Fatalf("EnabledPlugins = %+v, want [%s] auto-enabled for a pre-P1 profile", got.EnabledPlugins, plugin.CloudAccountsID)
 	}
+	accounts := GetCloudAccountsSettings(got).Accounts
+	if len(accounts) != 1 || accounts[0] != (AccountRef{Provider: "aws", Account: "prod"}) {
+		t.Fatalf("accounts = %+v, want the legacy top-level account folded into cloud-accounts settings", accounts)
+	}
 
-	// The auto-enable is in-memory only — the file on disk must be untouched
+	// Both migrations are in-memory only — the file on disk must be untouched
 	// until an explicit Save (this is what makes the mechanism self-erasing:
 	// re-reading without saving must reproduce the exact same result).
-	raw, err := os.ReadFile(filepath.Join(root, "legacy0000000000000000000000000", "profile.json"))
+	rawOnDisk, err := os.ReadFile(filepath.Join(dir, "profile.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var onDisk Profile
-	if err := json.Unmarshal(raw, &onDisk); err != nil {
+	if err := json.Unmarshal(rawOnDisk, &onDisk); err != nil {
 		t.Fatal(err)
 	}
 	if len(onDisk.EnabledPlugins) != 0 {
@@ -186,6 +249,9 @@ func TestLegacyVersionOneProfileAutoEnablesCloudAccountsInMemory(t *testing.T) {
 	}
 	if onDisk.Version != 1 {
 		t.Fatalf("on-disk Version = %d, want still 1 (unmutated by a mere read)", onDisk.Version)
+	}
+	if len(onDisk.Settings) != 0 {
+		t.Fatalf("on-disk Settings = %+v, want untouched (still absent)", onDisk.Settings)
 	}
 }
 

@@ -64,7 +64,7 @@ func Export(root, id string, w io.Writer) error {
 // total decompressed size are all capped, every entry name must satisfy
 // filepath.IsLocal (rejects "..", absolute paths), and only files in
 // importAllowlist are accepted.
-func Import(root string, r io.Reader) (Profile, error) {
+func Import(root string, r io.Reader) (imported Profile, err error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxImportBytes+1))
 	if err != nil {
 		return Profile{}, err
@@ -120,6 +120,18 @@ func Import(root string, r io.Reader) (Profile, error) {
 		return Profile{}, fmt.Errorf("parse profile.json: %w", err)
 	}
 
+	// Parsing and zip-bomb validation above deliberately happen outside the
+	// root lock. Only the name snapshot plus final create need serialization.
+	release, err := acquireRootLock(root)
+	if err != nil {
+		return Profile{}, err
+	}
+	defer func() {
+		if releaseErr := release(); err == nil && releaseErr != nil {
+			err = releaseErr
+		}
+	}()
+
 	existing, err := List(root)
 	if err != nil {
 		return Profile{}, err
@@ -128,7 +140,7 @@ func Import(root string, r io.Reader) (Profile, error) {
 	// Create ignores whatever ID/Version/timestamps came in (validateProfile
 	// never copies them) — an imported profile is always a NEW profile,
 	// never a rebind of the exporting machine's ID.
-	return Create(root, incoming)
+	return createWithRootLockHeld(root, incoming)
 }
 
 // importUniqueName appends " (Imported)", " (Imported 2)", … until name is

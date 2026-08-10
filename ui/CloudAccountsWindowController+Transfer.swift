@@ -11,7 +11,7 @@ extension CloudAccountsWindowController {
 
     private func exportableSelection() -> (provider: String, name: String)? {
         guard let name = selectedProfileName else {
-            showError("Select a saved profile to export.")
+            showError("Select a saved account to export.")
             return nil
         }
         return (selectedProvider, name)
@@ -27,7 +27,7 @@ extension CloudAccountsWindowController {
         do {
             let text = try service.export(provider: target.provider, target.name, format: format, extraEnv: profile.envVars.asDictionary())
             guard !text.isEmpty else {
-                setStatus("Nothing to export — profile has no saved values")
+                setStatus("Nothing to export — account has no saved values")
                 return
             }
             copyConcealed(text)
@@ -90,6 +90,7 @@ extension CloudAccountsWindowController {
                 return
             }
             pasteView.string = text
+            updatePasteViewPlaceholder()
             if !applyParsedCredentialsFromPaste(force: true, userInitiated: true) {
                 showError("No \(catalog.providerDisplayName(currentEditingProvider())) variables recognized in \(url.lastPathComponent).")
             }
@@ -102,13 +103,13 @@ extension CloudAccountsWindowController {
     /// see the field diff (secrets masked) without touching anything.
     @objc func compareProfiles() {
         guard let name = selectedProfileName else {
-            showError("Select a profile to compare.")
+            showError("Select an account to compare.")
             return
         }
         let provider = selectedProvider
         let others = (profilesByProvider[provider] ?? []).map(\.name).filter { $0 != name }
         guard !others.isEmpty else {
-            showError("No other \(catalog.providerDisplayName(provider)) profiles to compare with.")
+            showError("No other \(catalog.providerDisplayName(provider)) accounts to compare with.")
             return
         }
 
@@ -132,7 +133,7 @@ extension CloudAccountsWindowController {
             let result = NSAlert()
             result.messageText = "\(name)  →  \(otherName)"
             result.informativeText = total == 0
-                ? "The profiles are identical."
+                ? "The accounts are identical."
                 : "\(total) difference\(total == 1 ? "" : "s"). “Added” exists only in \(otherName); “removed” only in \(name)."
             if total > 0 {
                 result.accessoryView = diffAccessoryView(diff)
@@ -150,14 +151,14 @@ extension CloudAccountsWindowController {
         guard let name = selectedProfileName, let info = catalog.providerInfo(selectedProvider), info.canActivate else { return }
 
         let alert = NSAlert()
-        alert.messageText = info.activateLabel ?? "Set active profile"
+        alert.messageText = info.activateLabel ?? "Set active account"
         switch selectedProvider {
         case "aws":
-            alert.informativeText = "The fields of “\(name)” will be copied over the [default] profile in \(pathsByProvider["aws"] ?? "~/.aws/credentials"). “\(name)” itself is not modified; a timestamped backup is written first."
+            alert.informativeText = "The fields of “\(name)” will be copied over the [default] account in \(pathsByProvider["aws"] ?? "~/.aws/credentials"). “\(name)” itself is not modified; a timestamped backup is written first."
         case "gcp":
             alert.informativeText = "gcloud will switch to configuration “\(name)” (same as `gcloud config configurations activate \(name)`)."
         default:
-            alert.informativeText = "Profile “\(name)” becomes the active one."
+            alert.informativeText = "Account “\(name)” becomes the active one."
         }
         alert.addButton(withTitle: "Proceed")
         alert.addButton(withTitle: "Cancel")

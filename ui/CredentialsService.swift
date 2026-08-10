@@ -9,10 +9,14 @@ import Foundation
 final class CredentialsService {
     enum ServiceError: LocalizedError {
         case toolFailed(String)
+        /// Stable Swift-side classification of the Go core's optimistic
+        /// concurrency failure. UI code must not infer conflict behavior from
+        /// an arbitrary alert string.
+        case profileCoreConflict(String)
 
         var errorDescription: String? {
             switch self {
-            case .toolFailed(let message):
+            case .toolFailed(let message), .profileCoreConflict(let message):
                 return message
             }
         }
@@ -85,6 +89,14 @@ final class CredentialsService {
         _ = try run(["activate", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
     }
 
+    /// Test Connection: runs the provider's own vendor-CLI identity/liveness
+    /// call for one credential-entry profile. Always dispatch through
+    /// `runAsync` — this hits the network via the vendor CLI, same as
+    /// Launch Templates.
+    func check(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws -> CheckResult {
+        try decode(run(["check", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv))
+    }
+
     // MARK: - Process plumbing
 
     func decode<T: Decodable>(_ data: Data) throws -> T {
@@ -122,7 +134,11 @@ final class CredentialsService {
         if process.terminationStatus != 0 {
             let message = String(data: errorData, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
                 ?? String(data: data, encoding: .utf8) ?? "Command failed"
-            throw ServiceError.toolFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+            let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.contains("profile core changed since draft was loaded") {
+                throw ServiceError.profileCoreConflict(normalized)
+            }
+            throw ServiceError.toolFailed(normalized)
         }
         return data
     }

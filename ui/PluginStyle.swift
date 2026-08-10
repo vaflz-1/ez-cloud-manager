@@ -33,4 +33,36 @@ enum PluginStyle {
             return true
         }
     }
+
+    /// A rounded-square "icon chip": a soft-tinted background with a
+    /// centered SF Symbol — the shared visual unit behind plugin cards, the
+    /// Add Plugins tile, and the Hub's empty-state hero, so the
+    /// NSView+layer-radius+fill boilerplate exists in exactly one place
+    /// rather than copy-pasted at each call site. The returned view already
+    /// carries its own fixed width/height constraints; callers only need to
+    /// position it (leading/centerY/etc.) in their own layout.
+    static func iconChip(diameter: CGFloat, radius: CGFloat? = nil, fill: NSColor,
+                          symbol: String, symbolColor: NSColor, pointSize: CGFloat) -> NSView {
+        let chip = NSView()
+        chip.wantsLayer = true
+        chip.layer?.backgroundColor = fill.cgColor
+        chip.layer?.cornerRadius = radius ?? diameter / 4
+        chip.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(cfg)
+        icon.contentTintColor = symbolColor
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(icon)
+
+        NSLayoutConstraint.activate([
+            chip.widthAnchor.constraint(equalToConstant: diameter),
+            chip.heightAnchor.constraint(equalToConstant: diameter),
+            icon.centerXAnchor.constraint(equalTo: chip.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: chip.centerYAnchor)
+        ])
+        return chip
+    }
 }
