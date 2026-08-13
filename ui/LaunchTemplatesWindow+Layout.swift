@@ -22,8 +22,9 @@ extension LaunchTemplatesWindowController {
         regionField = NSTextField(string: "")
         regionField.placeholderString = "us-east-1"
         regionField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        regionField.delegate = self
         let loadButton = NSButton(title: "Load", target: self, action: #selector(loadTemplates))
-        loadButton.bezelStyle = .rounded
+        UI.style(loadButton, as: .secondary)
 
         spinner = NSProgressIndicator()
         spinner.style = .spinning
@@ -64,11 +65,11 @@ extension LaunchTemplatesWindowController {
         versionPopup.action = #selector(versionPicked(_:))
 
         deleteVersionButton = NSButton(title: "Delete Version…", target: self, action: #selector(deleteSelectedVersion))
-        deleteVersionButton.bezelStyle = .rounded
+        UI.style(deleteVersionButton, as: .secondary)
         deleteVersionButton.controlSize = .small
 
         rollbackButton = NSButton(title: "Roll Back Default", target: self, action: #selector(rollback))
-        rollbackButton.bezelStyle = .rounded
+        UI.style(rollbackButton, as: .secondary)
         rollbackButton.controlSize = .small
         rollbackButton.isHidden = true
 
@@ -102,7 +103,7 @@ extension LaunchTemplatesWindowController {
         fieldsScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let addFieldButton = NSButton(title: "Add Field…", target: self, action: #selector(addField))
-        addFieldButton.bezelStyle = .rounded
+        UI.style(addFieldButton, as: .secondary)
         addFieldButton.controlSize = .small
 
         descriptionField = NSTextField(string: "")
@@ -112,7 +113,7 @@ extension LaunchTemplatesWindowController {
         setDefaultCheckbox.state = .on
 
         applyButton = NSButton(title: "Apply as New Version", target: self, action: #selector(applyEdits))
-        applyButton.bezelStyle = .push
+        UI.style(applyButton, as: .primary)
         applyButton.keyEquivalent = "\r"
         applyButton.isEnabled = false
 

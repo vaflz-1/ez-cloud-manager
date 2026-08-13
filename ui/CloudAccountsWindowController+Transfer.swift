@@ -14,6 +14,7 @@ extension CloudAccountsWindowController {
             showError("Select a saved connection to export.")
             return nil
         }
+        guard requireCurrentConnectionAuthorization(provider: selectedProvider, name: name) else { return nil }
         return (selectedProvider, name)
     }
 
@@ -25,7 +26,13 @@ extension CloudAccountsWindowController {
         guard sender.tag >= 0, sender.tag < Self.exportFormats.count else { return }
         let format = Self.exportFormats[sender.tag]
         do {
-            let text = try service.export(provider: target.provider, target.name, format: format, extraEnv: profile.envVars.asDictionary())
+            let text = try service.export(
+                provider: target.provider,
+                target.name,
+                workspaceID: profile.id,
+                format: format,
+                extraEnv: profile.envVars.asDictionary()
+            )
             guard !text.isEmpty else {
                 setStatus("Nothing to export — connection has no saved values")
                 return
@@ -57,9 +64,16 @@ extension CloudAccountsWindowController {
         panel.accessoryView = stack
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard requireCurrentConnectionAuthorization(provider: target.provider, name: target.name) else { return }
         let format = Self.exportFormats[max(0, formatPopup.indexOfSelectedItem)]
         do {
-            let text = try service.export(provider: target.provider, target.name, format: format, extraEnv: profile.envVars.asDictionary())
+            let text = try service.export(
+                provider: target.provider,
+                target.name,
+                workspaceID: profile.id,
+                format: format,
+                extraEnv: profile.envVars.asDictionary()
+            )
             // 0600: an exported profile is as sensitive as the store itself.
             try text.data(using: .utf8)?.write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -107,7 +121,11 @@ extension CloudAccountsWindowController {
             return
         }
         let provider = selectedProvider
-        let others = (profilesByProvider[provider] ?? []).map(\.name).filter { $0 != name }
+        guard requireCurrentConnectionAuthorization(provider: provider, name: name) else { return }
+        let others = profile
+            .filterConnections(profilesByProvider[provider] ?? [], provider: provider)
+            .map(\.name)
+            .filter { $0 != name }
         guard !others.isEmpty else {
             showError("No other \(catalog.providerDisplayName(provider)) connections to compare with.")
             return
@@ -122,11 +140,24 @@ extension CloudAccountsWindowController {
         picker.addButton(withTitle: "Compare")
         picker.addButton(withTitle: "Cancel")
         guard picker.runModal() == .alertFirstButtonReturn, let otherName = popup.selectedItem?.title else { return }
+        guard requireCurrentConnectionAuthorization(provider: provider, name: name),
+              requireCurrentConnectionAuthorization(provider: provider, name: otherName)
+        else { return }
 
         do {
             let extraEnv = profile.envVars.asDictionary()
-            let mine = try service.get(provider: provider, name, extraEnv: extraEnv).fields
-            let theirs = try service.get(provider: provider, otherName, extraEnv: extraEnv).fields
+            let mine = try service.get(
+                provider: provider,
+                name,
+                workspaceID: profile.id,
+                extraEnv: extraEnv
+            ).fields
+            let theirs = try service.get(
+                provider: provider,
+                otherName,
+                workspaceID: profile.id,
+                extraEnv: extraEnv
+            ).fields
             let diff = diffGroups(old: mine, new: theirs)
             let total = diff.added.count + diff.changed.count + diff.removed.count
 
@@ -145,27 +176,35 @@ extension CloudAccountsWindowController {
         }
     }
 
-    /// Provider-native "make this the active/default profile", with an
-    /// explicit explanation of what will actually happen.
+    /// Provider-native machine-global active/default mutation. Workspace
+    /// scoping never contains this blast radius, so both the button and this
+    /// confirmation name every affected consumer explicitly.
     @objc func activateProfile() {
         guard let name = selectedProfileName, let info = catalog.providerInfo(selectedProvider), info.canActivate else { return }
+        guard requireCurrentConnectionAuthorization(provider: selectedProvider, name: name) else { return }
 
         let alert = NSAlert()
-        alert.messageText = info.activateLabel ?? "Set active connection"
+        alert.messageText = "Make “\(name)” active on this Mac?"
         switch selectedProvider {
         case "aws":
-            alert.informativeText = "The fields of “\(name)” will be copied over the [default] connection in \(pathsByProvider["aws"] ?? "~/.aws/credentials"). “\(name)” itself is not modified; a timestamped backup is written first."
+            alert.informativeText = "This replaces [default] in \(pathsByProvider["aws"] ?? "~/.aws/credentials"). Every Kervik Workspace, terminal and app using that same credentials file without an explicit profile may switch identity. “\(name)” itself is not modified; a timestamped backup is written first."
         case "gcp":
-            alert.informativeText = "gcloud will switch to configuration “\(name)” (same as `gcloud config configurations activate \(name)`)."
+            alert.informativeText = "This changes the active configuration in this Workspace’s gcloud config directory to “\(name)”. Every Kervik Workspace, terminal and app using that same directory will see the change."
         default:
-            alert.informativeText = "Connection “\(name)” becomes the active one."
+            alert.informativeText = "Connection “\(name)” becomes active for every Workspace, terminal and app using the same provider store."
         }
-        alert.addButton(withTitle: "Proceed")
+        alert.addButton(withTitle: "Make Active Globally")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard requireCurrentConnectionAuthorization(provider: selectedProvider, name: name) else { return }
 
         do {
-            try service.activate(provider: selectedProvider, name, extraEnv: profile.envVars.asDictionary())
+            try service.activate(
+                provider: selectedProvider,
+                name,
+                workspaceID: profile.id,
+                extraEnv: profile.envVars.asDictionary()
+            )
             refreshProfiles()
             setStatus("\(name) is now active (\(catalog.providerDisplayName(selectedProvider)))")
         } catch {

@@ -287,7 +287,7 @@ func (p awsProvider) Activate(path, name string) error {
 	return awscreds.Save(path, "default", fields)
 }
 
-func (awsProvider) ActivateLabel() string { return "Copy to [default] profile" }
+func (awsProvider) ActivateLabel() string { return "Replace machine-wide [default]" }
 
 // Check runs `aws sts get-caller-identity` for the named profile — the
 // standard vendor-CLI liveness call, requiring no permissions beyond

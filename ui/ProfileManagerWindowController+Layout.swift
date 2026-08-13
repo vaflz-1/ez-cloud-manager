@@ -211,7 +211,7 @@ extension ProfileManagerWindowController {
         content.addSubview(statusLabel)
 
         saveButton = NSButton(title: "Save", target: self, action: #selector(saveDetail))
-        saveButton.bezelStyle = .push
+        UI.style(saveButton, as: .primary)
         saveButton.keyEquivalent = "\r"
         saveButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(saveButton)

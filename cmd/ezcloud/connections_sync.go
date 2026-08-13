@@ -72,7 +72,14 @@ func connectionsAuthCommand(args []string) {
 		}
 		ctx, cancel := connectionAuthContext(2 * time.Minute)
 		defer cancel()
-		response, err := manager.Apply(ctx, *providerID, request)
+		response, err := manager.ApplyGuarded(ctx, *providerID, request, func(providerID, storePath string, names []string) error {
+			for _, name := range names {
+				if err := removeConnectionRefsFromMatchingWorkspaces(providerID, name, storePath); err != nil {
+					return fmt.Errorf("remove stale workspace grants for %q: %w", name, err)
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			auditRecordKeys("auth-sync-failed", *providerID, "", nil)
 			fail(connectionAuthError(err))

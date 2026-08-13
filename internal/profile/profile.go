@@ -48,7 +48,9 @@ const (
 	// CloudAccountsSettings); see readProfile's second legacy migration block.
 	// v4: SavedAt records explicit core-profile saves independently from
 	// UpdatedAt, which also changes for addon enablement and settings writes.
-	currentVersion = 4
+	// v5: Connection policy is fail-closed. Profiles without an explicit policy
+	// blob are materialized as allow-none, closing the old UI's show-all leak.
+	currentVersion = 5
 	// maxNameLen bounds a profile name, measured in Unicode code points.
 	maxNameLen = 64
 	// maxEnvVars caps env vars per profile — generous for real use, small
@@ -215,6 +217,17 @@ func Create(root string, p Profile) (created Profile, err error) {
 // critical section prevents two processes from validating the same free name
 // and then both committing it. It must never acquire the root lock itself.
 func createWithRootLockHeld(root string, p Profile) (Profile, error) {
+	p.Settings = cloneSettings(p.Settings)
+	if p.Settings == nil {
+		p.Settings = map[string]json.RawMessage{}
+	}
+	if _, exists := p.Settings[plugin.CloudAccountsID]; !exists {
+		blob, err := json.Marshal(CloudAccountsSettings{})
+		if err != nil {
+			return Profile{}, err
+		}
+		p.Settings[plugin.CloudAccountsID] = blob
+	}
 	normalized, err := validateProfile(p)
 	if err != nil {
 		return Profile{}, err
@@ -288,11 +301,66 @@ func UpdateCore(root string, update CoreUpdate) (Profile, error) {
 				update.ID,
 			)
 		}
+		clearConnectionRefsForReroutedProviders(current, update.EnvVars)
 		current.Name = update.Name
 		current.EnvVars = update.EnvVars
 		current.SavedAt = nextProfileTimestamp(current.SavedAt, current.UpdatedAt)
 		return nil
 	})
+}
+
+// clearConnectionRefsForReroutedProviders prevents a grant expressed as
+// (provider, name) from silently authorizing an equal name in a different
+// credential store after the Workspace routing environment changes. A future
+// schema can carry store identity in AccountRef; until then, revocation is the
+// only safe backward-compatible transition.
+func clearConnectionRefsForReroutedProviders(current *Profile, nextEnv []EnvVar) {
+	providerRoutingKeys := map[string][]string{
+		// AWS names can come from either the editable credentials store or the
+		// read-only SSO shared-config store; rerouting either invalidates refs.
+		"aws": {"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"},
+		"gcp": {"CLOUDSDK_CONFIG"},
+	}
+	currentEnv := envVarsByKey(current.EnvVars)
+	next := envVarsByKey(nextEnv)
+	changed := map[string]bool{}
+	for providerID, keys := range providerRoutingKeys {
+		for _, key := range keys {
+			if currentEnv[key] != next[key] {
+				changed[providerID] = true
+				break
+			}
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
+	settings := GetCloudAccountsSettings(*current)
+	settings.ShowAllAccounts = false
+	refs := settings.Accounts[:0]
+	for _, ref := range settings.Accounts {
+		if !changed[ref.Provider] {
+			refs = append(refs, ref)
+		}
+	}
+	settings.Accounts = refs
+	blob, err := json.Marshal(settings)
+	if err != nil {
+		return
+	}
+	current.Settings = cloneSettings(current.Settings)
+	if current.Settings == nil {
+		current.Settings = map[string]json.RawMessage{}
+	}
+	current.Settings[plugin.CloudAccountsID] = blob
+}
+
+func envVarsByKey(envVars []EnvVar) map[string]string {
+	values := make(map[string]string, len(envVars))
+	for _, variable := range envVars {
+		values[strings.TrimSpace(variable.Key)] = strings.TrimSpace(variable.Value)
+	}
+	return values
 }
 
 // UpdateEnabledPlugins applies a batch of enable/disable decisions to the
@@ -597,6 +665,21 @@ func readProfile(root, dirName string) (Profile, error) {
 				if err == nil {
 					p.Settings[plugin.CloudAccountsID] = blob
 				}
+			}
+		}
+	}
+	// v5 makes missing Connection policy fail closed. The old Swift fallback
+	// rendered a missing blob as show-all, which leaked machine-wide Connection
+	// names into unrelated Workspaces. Materialize allow-none in memory; the
+	// next write persists it with Version 5.
+	if p.Version < 5 {
+		if p.Settings == nil {
+			p.Settings = map[string]json.RawMessage{}
+		}
+		if _, exists := p.Settings[plugin.CloudAccountsID]; !exists {
+			blob, err := json.Marshal(CloudAccountsSettings{})
+			if err == nil {
+				p.Settings[plugin.CloudAccountsID] = blob
 			}
 		}
 	}

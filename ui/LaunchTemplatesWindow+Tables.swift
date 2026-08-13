@@ -67,10 +67,16 @@ extension LaunchTemplatesWindowController {
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard notification.object as? NSTableView == templatesTable else { return }
+        invalidateRequestContext()
         let row = templatesTable.selectedRow
-        guard row >= 0, row < templates.count else { return }
+        guard row >= 0, row < templates.count else {
+            currentTemplate = nil
+            clearVersionState()
+            return
+        }
         rollbackVersion = nil
         currentTemplate = templates[row]
+        clearVersionState()
         loadVersions(for: templates[row])
     }
 
@@ -85,6 +91,8 @@ extension LaunchTemplatesWindowController {
     @objc func versionPicked(_ sender: NSPopUpButton) {
         guard let template = currentTemplate,
               let version = sender.selectedItem?.representedObject as? String else { return }
+        invalidateRequestContext()
+        clearLoadedVersionData()
         loadVersionData(template: template, version: version)
     }
 
@@ -108,6 +116,8 @@ extension LaunchTemplatesWindowController {
     func controlTextDidChange(_ obj: Notification) {
         if obj.object as? NSSearchField == fieldSearch {
             applyFieldFilter()
+        } else if obj.object as? NSTextField == regionField {
+            regionDidChange()
         }
     }
 }

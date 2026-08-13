@@ -197,6 +197,7 @@ extension CloudAccountsWindowController {
     // MARK: - Inline edit / reveal handlers (tag = fieldRows index)
 
     @objc func keyFieldEdited(_ sender: NSTextField) {
+        guard !selectedConnectionAccessRevoked else { return }
         let idx = sender.tag
         guard idx >= 0, idx < fieldRows.count else { return }
         let typed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -207,6 +208,7 @@ extension CloudAccountsWindowController {
     }
 
     @objc func valueFieldEdited(_ sender: NSTextField) {
+        guard !selectedConnectionAccessRevoked else { return }
         let idx = sender.tag
         guard idx >= 0, idx < fieldRows.count else { return }
         fieldRows[idx].value = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -215,6 +217,14 @@ extension CloudAccountsWindowController {
     }
 
     @objc func toggleRowReveal(_ sender: NSButton) {
+        guard !selectedConnectionAccessRevoked else {
+            showError("This Connection is no longer allowed in this Workspace, so its secret values stay concealed.")
+            return
+        }
+        if let name = selectedProfileName,
+           !requireCurrentConnectionAuthorization(provider: selectedProvider, name: name) {
+            return
+        }
         let idx = sender.tag
         guard idx >= 0, idx < fieldRows.count else { return }
         fieldRows[idx].revealed.toggle()

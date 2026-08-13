@@ -41,6 +41,10 @@ and external Connector runtime are introduced.
   keys are deliberately never imported — keys stay in files.
 - **Connections** — manage AWS, Google Cloud and Azure contexts through
   connector-owned local stores; add-ons never need raw credentials.
+  The physical inventory is shared with the vendor CLIs on this Mac, but each
+  Workspace starts with an empty allow-list and can use only the Connections
+  explicitly made visible there. Sensitive CLI verbs require `--workspace`;
+  filtering is enforced by the core, not trusted to the window alone.
 - **Sign In / Sync** — on an explicit user action, AWS IAM Identity Center
   and Google Cloud open the system browser through their official CLIs. A
   token-free Add/Update/Unchanged preview appears before selected Connections
@@ -48,7 +52,9 @@ and external Connector runtime are introduced.
 - **Import / Export** — import any config file; export as shell `export`
   lines, `.env`, Connector-native INI, or JSON. Clipboard exports use the
   concealed pasteboard type (clipboard managers won't log them); file
-  exports are written 0600.
+  exports are written 0600. Whole-Workspace `.ezprofile` imports start with
+  no visible Connections: local machine/store identities must be reviewed
+  and selected explicitly after import.
 - **Compare** — field-level diff of two Connections, secrets masked.
 - **Switch** — make a gcloud configuration active, or copy an AWS profile
   over `[default]`, always behind an explicit confirmation.
@@ -90,9 +96,9 @@ The UI talks to the CLI over JSON; the CLI is fully usable standalone:
 ```bash
 ezcloud providers
 ezcloud list --provider gcp
-ezcloud export --provider azure --profile client-a --format env
+ezcloud export --provider azure --workspace WORKSPACE_ID --profile client-a --format env
 pbpaste | ezcloud parse --provider azure
-ezcloud lt templates --profile prod --region eu-west-1
+ezcloud lt templates --workspace WORKSPACE_ID --profile prod --region eu-west-1
 ezcloud audit --limit 20
 ezcloud connections auth discover --provider aws
 ```

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ez-cloud-manager/internal/audit"
+	profilemodel "ez-cloud-manager/internal/profile"
 	"ez-cloud-manager/internal/provider"
 )
 
@@ -40,10 +41,65 @@ func (e cliEnv) runWithPath(t *testing.T, dir string, args ...string) (stdout, s
 	return outBuf.String(), errBuf.String(), code
 }
 
+// seedCheckWorkspace gives the sensitive `check` verb both halves of its
+// authorization contract: a real Connection in the Workspace-resolved store
+// and an explicit grant to that existing identity. Vendor binaries remain
+// isolated by runWithPath, so these fixtures never touch live cloud state.
+func seedCheckWorkspace(t *testing.T, e cliEnv, providerID, connectionName string) string {
+	t.Helper()
+	var (
+		store  string
+		env    []profilemodel.EnvVar
+		fields map[string]string
+	)
+	switch providerID {
+	case "aws":
+		store = filepath.Join(e.configDir, "check-aws-credentials")
+		env = []profilemodel.EnvVar{{Key: "AWS_SHARED_CREDENTIALS_FILE", Value: store}}
+		fields = map[string]string{
+			"aws_access_key_id":     "AKIAEXAMPLE",
+			"aws_secret_access_key": "not-a-real-secret",
+		}
+	case "gcp":
+		store = filepath.Join(e.configDir, "check-gcloud")
+		env = []profilemodel.EnvVar{{Key: "CLOUDSDK_CONFIG", Value: store}}
+		fields = map[string]string{"core.account": "nobody@example.invalid"}
+	case "azure":
+		store = filepath.Join(e.configDir, "azure_profiles.ini")
+		fields = map[string]string{"tenant_id": "tenant-example"}
+	default:
+		t.Fatalf("unsupported check fixture provider %q", providerID)
+	}
+
+	backend, err := provider.Get(providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Save(store, connectionName, fields); err != nil {
+		t.Fatalf("seed %s Connection: %v", providerID, err)
+	}
+	root := filepath.Join(e.dataDir, "profiles")
+	workspace, err := profilemodel.Create(root, profilemodel.Profile{
+		Name:    "check-" + providerID,
+		EnvVars: env,
+	})
+	if err != nil {
+		t.Fatalf("create check Workspace: %v", err)
+	}
+	if _, err := profilemodel.AddConnectionRef(root, workspace.ID, profilemodel.AccountRef{
+		Provider: providerID,
+		Account:  connectionName,
+	}); err != nil {
+		t.Fatalf("grant check Connection: %v", err)
+	}
+	return workspace.ID
+}
+
 func TestCheckAzureReportsUnsupportedCleanly(t *testing.T) {
 	e := newCLIEnv(t)
+	workspaceID := seedCheckWorkspace(t, e, "azure", "anything")
 	var result provider.CheckResult
-	e.runJSON(t, &result, "check", "--provider", "azure", "--profile", "anything")
+	e.runJSON(t, &result, "check", "--provider", "azure", "--workspace", workspaceID, "--profile", "anything")
 	if result.OK {
 		t.Fatal("azure has no Checker yet — expected ok=false")
 	}
@@ -58,7 +114,8 @@ func TestCheckAzureReportsUnsupportedCleanly(t *testing.T) {
 func TestCheckAwsMissingBinaryReportsCleanlyNeverRealCall(t *testing.T) {
 	e := newCLIEnv(t)
 	emptyBin := t.TempDir() // deliberately has no "aws" — forces the failure
-	stdout, stderr, code := e.runWithPath(t, emptyBin, "check", "--provider", "aws", "--profile", "does-not-exist")
+	workspaceID := seedCheckWorkspace(t, e, "aws", "does-not-exist")
+	stdout, stderr, code := e.runWithPath(t, emptyBin, "check", "--provider", "aws", "--workspace", workspaceID, "--profile", "does-not-exist")
 	if code != 0 {
 		t.Fatalf("a missing vendor CLI must still be a clean CheckResult (exit 0), got exit %d, stderr: %s", code, stderr)
 	}
@@ -74,7 +131,8 @@ func TestCheckAwsMissingBinaryReportsCleanlyNeverRealCall(t *testing.T) {
 func TestCheckGcpMissingBinaryReportsCleanlyNeverRealCall(t *testing.T) {
 	e := newCLIEnv(t)
 	emptyBin := t.TempDir()
-	stdout, stderr, code := e.runWithPath(t, emptyBin, "check", "--provider", "gcp", "--profile", "does-not-exist")
+	workspaceID := seedCheckWorkspace(t, e, "gcp", "does-not-exist")
+	stdout, stderr, code := e.runWithPath(t, emptyBin, "check", "--provider", "gcp", "--workspace", workspaceID, "--profile", "does-not-exist")
 	if code != 0 {
 		t.Fatalf("a missing vendor CLI must still be a clean CheckResult (exit 0), got exit %d, stderr: %s", code, stderr)
 	}
@@ -89,7 +147,9 @@ func TestCheckGcpMissingBinaryReportsCleanlyNeverRealCall(t *testing.T) {
 
 func TestCheckUnknownProviderRejected(t *testing.T) {
 	e := newCLIEnv(t)
-	_, stderr, code := e.run(t, "check", "--provider", "nonexistent-cloud", "--profile", "x")
+	var workspace profilemodel.Profile
+	e.runJSON(t, &workspace, "profile", "create", "--name", "workspace")
+	_, stderr, code := e.run(t, "check", "--provider", "nonexistent-cloud", "--workspace", workspace.ID, "--profile", "x")
 	if code == 0 {
 		t.Fatal("expected a non-zero exit for an unknown provider")
 	}
@@ -100,12 +160,22 @@ func TestCheckUnknownProviderRejected(t *testing.T) {
 
 func TestCheckMissingProfileRejected(t *testing.T) {
 	e := newCLIEnv(t)
-	_, stderr, code := e.run(t, "check", "--provider", "aws")
+	var workspace profilemodel.Profile
+	e.runJSON(t, &workspace, "profile", "create", "--name", "workspace")
+	_, stderr, code := e.run(t, "check", "--provider", "aws", "--workspace", workspace.ID)
 	if code == 0 {
 		t.Fatal("expected a non-zero exit for a missing --profile")
 	}
 	if stderr == "" {
 		t.Fatal("expected an error message on stderr")
+	}
+}
+
+func TestCheckMissingWorkspaceRejected(t *testing.T) {
+	e := newCLIEnv(t)
+	_, stderr, code := e.run(t, "check", "--provider", "aws", "--profile", "connection")
+	if code == 0 || !strings.Contains(stderr, "--workspace is required") {
+		t.Fatalf("unscoped check exit=%d stderr=%q, want mandatory Workspace rejection", code, stderr)
 	}
 }
 
@@ -116,7 +186,8 @@ func TestCheckMissingProfileRejected(t *testing.T) {
 func TestCheckAuditEntryNeverIncludesIdentityOrErrorText(t *testing.T) {
 	e := newCLIEnv(t)
 	emptyBin := t.TempDir()
-	e.runWithPath(t, emptyBin, "check", "--provider", "aws", "--profile", "some-secret-looking-profile-name")
+	workspaceID := seedCheckWorkspace(t, e, "aws", "some-secret-looking-profile-name")
+	e.runWithPath(t, emptyBin, "check", "--provider", "aws", "--workspace", workspaceID, "--profile", "some-secret-looking-profile-name")
 
 	events, err := audit.List(filepath.Join(e.configDir, "audit.log"), 0)
 	if err != nil {
@@ -163,7 +234,8 @@ func TestCheckTimeoutAbortsWallClockTimePromptly(t *testing.T) {
 	}
 
 	start := time.Now()
-	stdout, stderr, code := e.runWithPath(t, fakeBinDir, "check", "--provider", "aws", "--profile", "whatever", "--timeout", "1")
+	workspaceID := seedCheckWorkspace(t, e, "aws", "whatever")
+	stdout, stderr, code := e.runWithPath(t, fakeBinDir, "check", "--provider", "aws", "--workspace", workspaceID, "--profile", "whatever", "--timeout", "1")
 	elapsed := time.Since(start)
 	if code != 0 {
 		t.Fatalf("check exit %d, stderr: %s", code, stderr)

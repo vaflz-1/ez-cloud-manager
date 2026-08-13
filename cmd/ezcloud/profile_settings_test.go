@@ -58,15 +58,99 @@ func TestProfileSettingsGetUnknownPluginReturnsEmptyObject(t *testing.T) {
 	}
 }
 
+func TestProfileConnectionsAddRemoveAndAuthorize(t *testing.T) {
+	e := newCLIEnv(t)
+	var workspace profilemodel.Profile
+	e.runJSON(t, &workspace, "profile", "create", "--name", "workspace")
+	if _, stderr, code := e.runStdin(t, `{"fields":{"tenant_id":"tenant"},"expectAbsent":true}`,
+		"save", "--provider", "azure", "--workspace", workspace.ID, "--profile", "prod"); code != 0 {
+		t.Fatalf("seed Connection: exit %d, stderr: %s", code, stderr)
+	}
+
+	var added profilemodel.Profile
+	e.runJSON(t, &added,
+		"profile", "connections", "add",
+		"--id", workspace.ID, "--provider", "azure", "--account", "prod",
+	)
+	if !profilemodel.AllowsConnection(added, profilemodel.AccountRef{Provider: "azure", Account: "prod"}) {
+		t.Fatal("add endpoint did not persist the Connection grant")
+	}
+
+	assertAuthorized := func(want bool) {
+		t.Helper()
+		var response struct {
+			Allowed bool `json:"allowed"`
+		}
+		e.runJSON(t, &response,
+			"profile", "connections", "authorize",
+			"--id", workspace.ID, "--provider", "azure", "--account", "prod",
+		)
+		if response.Allowed != want {
+			t.Fatalf("authorize = %t, want %t", response.Allowed, want)
+		}
+	}
+	assertAuthorized(true)
+
+	var removed profilemodel.Profile
+	e.runJSON(t, &removed,
+		"profile", "connections", "remove",
+		"--id", workspace.ID, "--provider", "azure", "--account", "prod",
+	)
+	if profilemodel.AllowsConnection(removed, profilemodel.AccountRef{Provider: "azure", Account: "prod"}) {
+		t.Fatal("remove endpoint retained the Connection grant")
+	}
+	assertAuthorized(false)
+
+	_, stderr, code := e.run(t,
+		"profile", "connections", "add",
+		"--id", workspace.ID, "--provider", "azure", "--account", "does-not-exist",
+	)
+	if code == 0 || !strings.Contains(stderr, "does not exist") {
+		t.Fatalf("nonexistent Connection grant exit=%d stderr=%q, want rejection", code, stderr)
+	}
+}
+
+func TestProfileSettingsCloudAccountsRejectsStaleUpdatedAt(t *testing.T) {
+	e := newCLIEnv(t)
+	var workspace profilemodel.Profile
+	e.runJSON(t, &workspace, "profile", "create", "--name", "workspace")
+
+	added, err := profilemodel.AddConnectionRef(filepath.Join(e.dataDir, "profiles"), workspace.ID, profilemodel.AccountRef{
+		Provider: "aws", Account: "latest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := e.runStdin(t,
+		`{"accounts":[{"provider":"aws","account":"stale"}]}`,
+		"profile", "settings", "set", "--id", workspace.ID,
+		"--plugin", plugin.CloudAccountsID,
+		"--expected-updated-at", workspace.UpdatedAt,
+	)
+	if code == 0 || !strings.Contains(stderr, profilemodel.SettingsConflictMarker) {
+		t.Fatalf("stale settings set exit=%d stderr=%q, want stable conflict marker", code, stderr)
+	}
+	if !profilemodel.AllowsConnection(added, profilemodel.AccountRef{Provider: "aws", Account: "latest"}) {
+		t.Fatal("test setup did not add latest ref")
+	}
+
+	var current profilemodel.Profile
+	e.runJSON(t, &current, "profile", "show", "--id", workspace.ID)
+	if !profilemodel.AllowsConnection(current, profilemodel.AccountRef{Provider: "aws", Account: "latest"}) ||
+		profilemodel.AllowsConnection(current, profilemodel.AccountRef{Provider: "aws", Account: "stale"}) {
+		t.Fatalf("stale full settings write replaced latest policy: %+v", current)
+	}
+}
+
 func TestProfileSettingsSetGetRoundTrip(t *testing.T) {
 	e := newCLIEnv(t)
-	var p struct {
-		ID string `json:"id"`
-	}
+	var p profilemodel.Profile
 	e.runJSON(t, &p, "profile", "create", "--name", "a")
+	seedWorkspaceAzureConnection(t, e, p.ID, "prod")
 
-	stdout, stderr, code := e.runStdin(t, `{"showAllAccounts":false,"accounts":[{"provider":"aws","account":"prod"}]}`,
-		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID)
+	stdout, stderr, code := e.runStdin(t, `{"showAllAccounts":false,"accounts":[{"provider":"azure","account":"prod"}]}`,
+		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID,
+		"--expected-updated-at", p.UpdatedAt)
 	if code != 0 {
 		t.Fatalf("set exit %d, stderr: %s", code, stderr)
 	}
@@ -94,7 +178,7 @@ func TestProfileSettingsSetGetRoundTrip(t *testing.T) {
 	if err := json.Unmarshal([]byte(getOut), &got); err != nil {
 		t.Fatalf("decode get: %v\n%s", err, getOut)
 	}
-	if len(got.Accounts) != 1 || got.Accounts[0].Provider != "aws" || got.Accounts[0].Account != "prod" {
+	if len(got.Accounts) != 1 || got.Accounts[0].Provider != "azure" || got.Accounts[0].Account != "prod" {
 		t.Fatalf("round-tripped accounts = %+v", got.Accounts)
 	}
 }
@@ -137,15 +221,36 @@ func TestProfileSettingsSetCloudAccountsValidatesAccounts(t *testing.T) {
 	}
 }
 
+func TestProfileSettingsSetRejectsFutureConnectionGrant(t *testing.T) {
+	e := newCLIEnv(t)
+	var workspace profilemodel.Profile
+	e.runJSON(t, &workspace, "profile", "create", "--name", "future-grant")
+
+	_, stderr, code := e.runStdin(t,
+		`{"accounts":[{"provider":"azure","account":"not-created-yet"}]}`,
+		"profile", "settings", "set", "--id", workspace.ID,
+		"--plugin", plugin.CloudAccountsID,
+		"--expected-updated-at", workspace.UpdatedAt,
+	)
+	if code == 0 || !strings.Contains(stderr, "refusing future Connection grant") {
+		t.Fatalf("future-name grant exit=%d stderr=%q, want fail-closed rejection", code, stderr)
+	}
+	var current profilemodel.Profile
+	e.runJSON(t, &current, "profile", "show", "--id", workspace.ID)
+	if profilemodel.AllowsConnection(current, profilemodel.AccountRef{Provider: "azure", Account: "not-created-yet"}) {
+		t.Fatal("rejected future Connection name was still persisted")
+	}
+}
+
 func TestProfileSettingsSetCloudAccountsDedupes(t *testing.T) {
 	e := newCLIEnv(t)
-	var p struct {
-		ID string `json:"id"`
-	}
+	var p profilemodel.Profile
 	e.runJSON(t, &p, "profile", "create", "--name", "a")
+	seedWorkspaceAzureConnection(t, e, p.ID, "x")
 
-	stdout, stderr, code := e.runStdin(t, `{"accounts":[{"provider":"aws","account":"x"},{"provider":"aws","account":"x"}]}`,
-		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID)
+	stdout, stderr, code := e.runStdin(t, `{"accounts":[{"provider":"azure","account":"x"},{"provider":"azure","account":"x"}]}`,
+		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID,
+		"--expected-updated-at", p.UpdatedAt)
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
@@ -203,13 +308,16 @@ func TestProfileSettingsSetUnknownProfileRejected(t *testing.T) {
 // account name, a future plugin's arbitrary blob, etc. could be sensitive).
 func TestProfileSettingsSetAuditEntryNeverIncludesBlobContents(t *testing.T) {
 	e := newCLIEnv(t)
-	var p struct {
-		ID string `json:"id"`
-	}
+	var p profilemodel.Profile
 	e.runJSON(t, &p, "profile", "create", "--name", "a")
+	seedWorkspaceAzureConnection(t, e, p.ID, "super-secret-account-name")
+	if err := os.Remove(filepath.Join(e.configDir, "audit.log")); err != nil {
+		t.Fatalf("reset audit after Connection fixture: %v", err)
+	}
 
-	e.runStdin(t, `{"accounts":[{"provider":"aws","account":"super-secret-account-name"}]}`,
-		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID)
+	e.runStdin(t, `{"accounts":[{"provider":"azure","account":"super-secret-account-name"}]}`,
+		"profile", "settings", "set", "--id", p.ID, "--plugin", plugin.CloudAccountsID,
+		"--expected-updated-at", p.UpdatedAt)
 
 	// profile create also logs an entry, so find the settings-save one
 	// specifically rather than assuming it's the only event.
@@ -236,6 +344,22 @@ func TestProfileSettingsSetAuditEntryNeverIncludesBlobContents(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "super-secret-account-name") {
 		t.Fatalf("audit.log leaked settings blob content: %s", raw)
+	}
+}
+
+func seedWorkspaceAzureConnection(t *testing.T, e cliEnv, workspaceID, name string) {
+	t.Helper()
+	payload, err := json.Marshal(saveRequest{
+		Fields:       map[string]string{"tenant_id": "tenant-test-only"},
+		ExpectAbsent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, code := e.runStdin(t, string(payload),
+		"save", "--provider", "azure", "--workspace", workspaceID, "--profile", name,
+	); code != 0 {
+		t.Fatalf("seed Azure Connection %q: exit %d, stderr: %s", name, code, stderr)
 	}
 }
 

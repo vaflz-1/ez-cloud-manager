@@ -407,29 +407,46 @@ func TestGCPDiscoverAndApplyUsesConditionalDestinationState(t *testing.T) {
 		candidateByName(t, snapshot, "gamma-project").Status != StatusUpdate {
 		t.Fatalf("wrong candidate statuses: %+v", snapshot.Candidates)
 	}
-	response, err := manager.Apply(context.Background(), "gcp", ApplyRequest{
+	if replacement := candidateByName(t, snapshot, "gamma-project"); replacement.CanApply || replacement.Reason == "" {
+		t.Fatalf("material identity replacement was not blocked for review: %+v", replacement)
+	}
+	var guardedProvider, guardedStore string
+	var guardedNames []string
+	response, err := manager.ApplyGuarded(context.Background(), "gcp", ApplyRequest{
 		ExpectedRevision: snapshot.Revision,
 		Principal:        snapshot.Principal,
 		Mode:             ModeSelected,
 		CandidateIDs: []string{
 			candidateByName(t, snapshot, "beta-project").ID,
-			candidateByName(t, snapshot, "gamma-project").ID,
 		},
+	}, func(providerID, storePath string, names []string) error {
+		guardedProvider = providerID
+		guardedStore = storePath
+		guardedNames = append([]string(nil), names...)
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Added != 1 || response.Updated != 1 || response.Unchanged != 0 || len(response.Results) != 2 {
+	if guardedProvider != "gcp" || guardedStore != root || !slices.Equal(guardedNames, []string{"beta-project"}) {
+		t.Fatalf("create guard got provider=%q store=%q names=%v", guardedProvider, guardedStore, guardedNames)
+	}
+	if response.Added != 1 || response.Updated != 0 || response.Unchanged != 0 || len(response.Results) != 1 {
 		t.Fatalf("apply response = %+v", response)
 	}
-	for _, name := range []string{"beta-project", "gamma-project"} {
-		profile, err := gcpcreds.Get(root, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if profile.Fields[gcpcreds.KeyAccount] != "alice@example.com" || profile.Fields[gcpcreds.KeyProject] != name {
-			t.Fatalf("profile %s = %+v", name, profile.Fields)
-		}
+	beta, err := gcpcreds.Get(root, "beta-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beta.Fields[gcpcreds.KeyAccount] != "alice@example.com" || beta.Fields[gcpcreds.KeyProject] != "beta-project" {
+		t.Fatalf("profile beta-project = %+v", beta.Fields)
+	}
+	gamma, err := gcpcreds.Get(root, "gamma-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gamma.Fields[gcpcreds.KeyAccount] != "old@example.com" || gamma.Fields[gcpcreds.KeyProject] != "old-project" {
+		t.Fatalf("blocked identity replacement changed gamma-project: %+v", gamma.Fields)
 	}
 	alpha, err := gcpcreds.Get(root, "alpha-project")
 	if err != nil {
@@ -437,6 +454,169 @@ func TestGCPDiscoverAndApplyUsesConditionalDestinationState(t *testing.T) {
 	}
 	if alpha.Fields[gcpcreds.KeyRegion] != "europe-west1" {
 		t.Fatalf("unrelated existing fields were not preserved: %+v", alpha.Fields)
+	}
+}
+
+func TestGCPMaterialIdentityChangeClassification(t *testing.T) {
+	base := gcpCandidateState{
+		Expected: map[string]string{
+			gcpcreds.KeyAccount: "alice@example.com",
+			gcpcreds.KeyProject: "alpha-project",
+			gcpcreds.KeyRegion:  "europe-west1",
+		},
+		Desired: map[string]string{
+			gcpcreds.KeyAccount: "alice@example.com",
+			gcpcreds.KeyProject: "alpha-project",
+			gcpcreds.KeyRegion:  "us-central1",
+		},
+	}
+	tests := []struct {
+		name  string
+		state gcpCandidateState
+		want  bool
+	}{
+		{name: "ordinary metadata update remains eligible", state: base},
+		{
+			name: "new destination is not a replacement",
+			state: gcpCandidateState{
+				ExpectAbsent: true,
+				Desired: map[string]string{
+					gcpcreds.KeyAccount: "alice@example.com",
+					gcpcreds.KeyProject: "alpha-project",
+				},
+			},
+		},
+		{
+			name: "principal replacement is blocked",
+			state: gcpCandidateState{
+				Expected: base.Expected,
+				Desired: map[string]string{
+					gcpcreds.KeyAccount: "bob@example.com",
+					gcpcreds.KeyProject: "alpha-project",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "project replacement is blocked",
+			state: gcpCandidateState{
+				Expected: base.Expected,
+				Desired: map[string]string{
+					gcpcreds.KeyAccount: "alice@example.com",
+					gcpcreds.KeyProject: "other-project",
+				},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gcpMaterialIdentityChanged(tc.state); got != tc.want {
+				t.Fatalf("gcpMaterialIdentityChanged() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGCPCreateGuardFailurePreventsProviderWrites(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{handler: func(_ string, args, _ []string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "auth" && args[1] == "list":
+			return []byte(`[{"account":"alice@example.com","status":"ACTIVE"}]`), nil
+		case len(args) > 1 && args[0] == "projects" && args[1] == "list":
+			return []byte(`[{"projectId":"brand-new-project","name":"New","lifecycleState":"ACTIVE"}]`), nil
+		default:
+			return nil, nil
+		}
+	}}
+	manager := newTestManager(t, runner, filepath.Join(t.TempDir(), "config"), filepath.Join(t.TempDir(), "credentials"), root)
+	manager.nonce = func() (string, error) { return "guard", nil }
+	snapshot, err := manager.Discover(context.Background(), "gcp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardErr := errors.New("scope store unavailable")
+	_, err = manager.ApplyGuarded(context.Background(), "gcp", ApplyRequest{
+		ExpectedRevision: snapshot.Revision,
+		Principal:        snapshot.Principal,
+		Mode:             ModeSelected,
+		CandidateIDs:     []string{snapshot.Candidates[0].ID},
+	}, func(providerID, storePath string, names []string) error {
+		if providerID != "gcp" || storePath != root || !slices.Equal(names, []string{"brand-new-project"}) {
+			t.Fatalf("unexpected create guard input: provider=%q store=%q names=%v", providerID, storePath, names)
+		}
+		return guardErr
+	})
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("apply error = %v, want create guard error", err)
+	}
+	profiles, listErr := gcpcreds.List(root)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("provider records written after create guard failure: %+v", profiles)
+	}
+}
+
+func TestGCPIdentityReplacementRejectedBeforeGuardOrWrite(t *testing.T) {
+	root := t.TempDir()
+	const name = "alpha-project"
+	if err := gcpcreds.Save(root, name, map[string]string{
+		gcpcreds.KeyAccount: "old-owner@example.com",
+		gcpcreds.KeyProject: name,
+		gcpcreds.KeyRegion:  "europe-west1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{handler: func(_ string, args, _ []string) ([]byte, error) {
+		switch {
+		case len(args) > 1 && args[0] == "auth" && args[1] == "list":
+			return []byte(`[{"account":"new-owner@example.com","status":"ACTIVE"}]`), nil
+		case len(args) > 1 && args[0] == "projects" && args[1] == "list":
+			return []byte(`[{"projectId":"alpha-project","name":"Alpha","lifecycleState":"ACTIVE"}]`), nil
+		default:
+			return nil, nil
+		}
+	}}
+	manager := newTestManager(t, runner, filepath.Join(t.TempDir(), "config"), filepath.Join(t.TempDir(), "credentials"), root)
+	manager.nonce = func() (string, error) { return "replacement", nil }
+	snapshot, err := manager.Discover(context.Background(), "gcp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := candidateByName(t, snapshot, name)
+	if candidate.Status != StatusUpdate {
+		t.Fatalf("candidate status = %q, want %q", candidate.Status, StatusUpdate)
+	}
+	guardCalled := false
+	_, err = manager.ApplyGuarded(context.Background(), "gcp", ApplyRequest{
+		ExpectedRevision: snapshot.Revision,
+		Principal:        snapshot.Principal,
+		Mode:             ModeSelected,
+		CandidateIDs:     []string{candidate.ID},
+	}, func(providerID, storePath string, names []string) error {
+		guardCalled = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("apply error = %v, want fail-closed identity replacement error", err)
+	}
+	// The guard and provider store use independent locks. Treat this assertion
+	// as the regression barrier: replacement must stop before the guard, so no
+	// cleanup-unlock/write interleaving can ever authorize the new principal.
+	if guardCalled {
+		t.Fatal("identity replacement reached the new-connection scope guard")
+	}
+	after, err := gcpcreds.Get(root, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Fields[gcpcreds.KeyAccount] != "old-owner@example.com" ||
+		after.Fields[gcpcreds.KeyProject] != name ||
+		after.Fields[gcpcreds.KeyRegion] != "europe-west1" {
+		t.Fatalf("existing configuration changed after rejected replacement: %+v", after.Fields)
 	}
 }
 
@@ -502,8 +682,8 @@ func TestGCPExistingCredentialOverrideCannotBeSynced(t *testing.T) {
 	root := t.TempDir()
 	const projectID = "blocked-project"
 	original := map[string]string{
-		gcpcreds.KeyAccount:                "old@example.com",
-		gcpcreds.KeyProject:                "old-project",
+		gcpcreds.KeyAccount:                "alice@example.com",
+		gcpcreds.KeyProject:                projectID,
 		"auth.impersonate_service_account": "router@example.com",
 	}
 	if err := gcpcreds.Save(root, projectID, original); err != nil {

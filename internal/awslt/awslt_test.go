@@ -311,6 +311,13 @@ func TestValidationRejectsBadProfileRegion(t *testing.T) {
 	}
 }
 
+func TestClientRequiresIsolatedEnvironmentWithoutInjectedRunner(t *testing.T) {
+	c := Client{Profile: "prod", Region: "us-east-1"}
+	if _, err := c.ListTemplates(); err == nil || !strings.Contains(err.Error(), "isolated AWS Connection snapshot") {
+		t.Fatalf("ListTemplates() error = %v, want fail-closed isolation error", err)
+	}
+}
+
 func TestRunAWSRedactsStderrAndReturnsSuccessOutput(t *testing.T) {
 	t.Setenv("AWS_CONFIG_FILE", "")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "")

@@ -18,6 +18,13 @@ func TestFreshProfileHasZeroEnabledPlugins(t *testing.T) {
 	if created.Version != currentVersion {
 		t.Fatalf("Version = %d, want %d (a fresh profile is never a legacy one)", created.Version, currentVersion)
 	}
+	settings := GetCloudAccountsSettings(created)
+	if settings.ShowAllAccounts || len(settings.Accounts) != 0 {
+		t.Fatalf("fresh profile Connection policy = %+v, want explicit allow-none", settings)
+	}
+	if _, exists := created.Settings[plugin.CloudAccountsID]; !exists {
+		t.Fatal("fresh profile omitted its explicit allow-none Connection policy")
+	}
 }
 
 func TestEnabledPluginsPersistsAcrossSaveLoad(t *testing.T) {
@@ -186,7 +193,7 @@ func TestEnabledPluginsPerProfileIndependence(t *testing.T) {
 
 // writeRawProfile writes a profile.json by hand, bypassing Create/Save
 // entirely — the only way to put a pre-P1 (Version 1) profile on disk, since
-// every writer in this build now stamps currentVersion (2).
+// every writer in this build now stamps currentVersion.
 func writeRawProfile(t *testing.T, root string, p Profile) {
 	t.Helper()
 	dir := filepath.Join(root, p.ID)
@@ -252,6 +259,68 @@ func TestLegacyVersionOneProfileAutoEnablesCloudAccountsInMemory(t *testing.T) {
 	}
 	if len(onDisk.Settings) != 0 {
 		t.Fatalf("on-disk Settings = %+v, want untouched (still absent)", onDisk.Settings)
+	}
+}
+
+func TestLegacyExplicitShowAllAccountsRemainsAllowed(t *testing.T) {
+	root := tmpRoot(t)
+	id := "legacyshowall000000000000000000"
+	dir := filepath.Join(root, id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Version 2 predates plugin-owned settings. Preserve its explicit legacy
+	// opt-in while fresh current-version Workspaces default to allow-none.
+	raw := `{"id":"` + id + `","name":"legacy-show-all","version":2,"showAllAccounts":true}`
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Get(root, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !GetCloudAccountsSettings(got).ShowAllAccounts {
+		t.Fatal("legacy explicit showAllAccounts opt-in was not preserved")
+	}
+	if !AllowsConnection(got, AccountRef{Provider: "aws", Account: "any"}) {
+		t.Fatal("legacy explicit show-all Workspace did not allow a valid Connection")
+	}
+}
+
+func TestV4MissingConnectionPolicyMigratesToExplicitAllowNone(t *testing.T) {
+	root := tmpRoot(t)
+	id := "legacyv4missingpolicy00000000000"
+	writeRawProfile(t, root, Profile{ID: id, Name: "legacy-v4", Version: 4})
+
+	got, err := Get(root, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	settings := GetCloudAccountsSettings(got)
+	if settings.ShowAllAccounts || len(settings.Accounts) != 0 {
+		t.Fatalf("migrated v4 policy = %+v, want explicit allow-none", settings)
+	}
+	if AllowsConnection(got, AccountRef{Provider: "aws", Account: "any"}) {
+		t.Fatal("migrated v4 profile retained the old missing-policy show-all leak")
+	}
+}
+
+func TestV4ExplicitAllowNoneRemainsAllowNone(t *testing.T) {
+	root := tmpRoot(t)
+	id := "legacyv4explicitnone0000000000"
+	writeRawProfile(t, root, Profile{
+		ID: id, Name: "legacy-v4-explicit", Version: 4,
+		Settings: cloudAccountsSettingsJSON(t, CloudAccountsSettings{}),
+	})
+
+	got, err := Get(root, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	settings := GetCloudAccountsSettings(got)
+	if settings.ShowAllAccounts || len(settings.Accounts) != 0 {
+		t.Fatalf("explicit v4 allow-none was changed during migration: %+v", settings)
 	}
 }
 

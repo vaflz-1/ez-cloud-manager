@@ -10,6 +10,7 @@ import AppKit
 extension CloudAccountsWindowController {
     @objc func openScopeSheet() {
         let current = profile.cloudAccountsSettings
+        let expectedUpdatedAt = profile.updatedAt
 
         let showAllCheckbox = NSButton(checkboxWithTitle: "Allow all discovered connections", target: nil, action: nil)
         showAllCheckbox.state = current.showAllAccounts ? .on : .off
@@ -64,7 +65,11 @@ extension CloudAccountsWindowController {
             accounts: Array(dataSource.selected)
         )
         do {
-            let saved = try service.saveCloudAccountsSettings(profileID: profile.id, newSettings)
+            let saved = try service.saveCloudAccountsSettings(
+                profileID: profile.id,
+                newSettings,
+                expectedUpdatedAt: expectedUpdatedAt
+            )
             profile = saved
             rebuildSidebarRows()
             // Any other open window on this same profile (the Hub, another
@@ -73,6 +78,12 @@ extension CloudAccountsWindowController {
             // save already uses.
             NotificationCenter.default.post(name: .profileDidChange, object: profile.id)
             setStatus("Updated connection scope")
+        } catch CredentialsService.ServiceError.profileSettingsConflict {
+            if let latest = try? service.refreshProfile(id: profile.id) {
+                profile = latest
+                rebuildSidebarRows()
+            }
+            showError("This workspace changed while Visible Connections was open. Your older selection was not applied; review the latest policy and try again.")
         } catch {
             showError(error.localizedDescription)
         }

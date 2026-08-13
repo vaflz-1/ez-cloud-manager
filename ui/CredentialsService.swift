@@ -13,13 +13,17 @@ final class CredentialsService {
         /// concurrency failure. UI code must not infer conflict behavior from
         /// an arbitrary alert string.
         case profileCoreConflict(String)
+        case profileSettingsConflict(String)
         case connectionConflict(String)
+        case connectionDeletedScopeCleanupFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .toolFailed(let message),
                  .profileCoreConflict(let message),
-                 .connectionConflict(let message):
+                 .profileSettingsConflict(let message),
+                 .connectionConflict(let message),
+                 .connectionDeletedScopeCleanupFailed(let message):
                 return message
             }
         }
@@ -209,21 +213,40 @@ final class CredentialsService {
         try decode(run(["list", "--provider", provider], input: nil, extraEnv: extraEnv))
     }
 
-    func get(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws -> ProfileResponse {
-        try decode(run(["get", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv))
+    func get(
+        provider: String,
+        _ name: String,
+        workspaceID: String,
+        extraEnv: [String: String] = [:]
+    ) throws -> ProfileResponse {
+        try decode(run(
+            ["get", "--provider", provider, "--profile", name, "--workspace", workspaceID],
+            input: nil,
+            extraEnv: extraEnv
+        ))
     }
 
     func parse(provider: String, _ text: String, extraEnv: [String: String] = [:]) throws -> ParseResponse {
         try decode(run(["parse", "--provider", provider], input: text, extraEnv: extraEnv))
     }
 
-    func delete(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws {
-        _ = try run(["delete", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
+    func delete(
+        provider: String,
+        _ name: String,
+        workspaceID: String,
+        extraEnv: [String: String] = [:]
+    ) throws {
+        _ = try run(
+            ["delete", "--provider", provider, "--profile", name, "--workspace", workspaceID],
+            input: nil,
+            extraEnv: extraEnv
+        )
     }
 
     func save(
         provider: String,
         _ name: String,
+        workspaceID: String,
         fields: [String: String],
         expectedFields: [String: String]? = nil,
         expectAbsent: Bool = false,
@@ -234,26 +257,58 @@ final class CredentialsService {
             expectedFields: expectedFields,
             expectAbsent: expectAbsent
         ))
-        _ = try run(["save", "--provider", provider, "--profile", name], inputData: payload, extraEnv: extraEnv)
+        _ = try run(
+            ["save", "--provider", provider, "--profile", name, "--workspace", workspaceID],
+            inputData: payload,
+            extraEnv: extraEnv
+        )
     }
 
     /// Raw text export (env / dotenv / ini / json). The caller owns secret
     /// hygiene: use the concealed pasteboard type or a user-chosen file.
-    func export(provider: String, _ name: String, format: String, extraEnv: [String: String] = [:]) throws -> String {
-        let data = try run(["export", "--provider", provider, "--profile", name, "--format", format], input: nil, extraEnv: extraEnv)
+    func export(
+        provider: String,
+        _ name: String,
+        workspaceID: String,
+        format: String,
+        extraEnv: [String: String] = [:]
+    ) throws -> String {
+        let data = try run(
+            ["export", "--provider", provider, "--profile", name, "--workspace", workspaceID, "--format", format],
+            input: nil,
+            extraEnv: extraEnv
+        )
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    func activate(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws {
-        _ = try run(["activate", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
+    func activate(
+        provider: String,
+        _ name: String,
+        workspaceID: String,
+        extraEnv: [String: String] = [:]
+    ) throws {
+        _ = try run(
+            ["activate", "--provider", provider, "--profile", name, "--workspace", workspaceID],
+            input: nil,
+            extraEnv: extraEnv
+        )
     }
 
     /// Test Connection: runs the provider's own vendor-CLI identity/liveness
     /// call for one credential-entry profile. Always dispatch through
     /// `runAsync` — this hits the network via the vendor CLI, same as
     /// Launch Templates.
-    func check(provider: String, _ name: String, extraEnv: [String: String] = [:]) throws -> CheckResult {
-        try decode(run(["check", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv))
+    func check(
+        provider: String,
+        _ name: String,
+        workspaceID: String,
+        extraEnv: [String: String] = [:]
+    ) throws -> CheckResult {
+        try decode(run(
+            ["check", "--provider", provider, "--profile", name, "--workspace", workspaceID],
+            input: nil,
+            extraEnv: extraEnv
+        ))
     }
 
     // MARK: - Process plumbing
@@ -305,6 +360,12 @@ final class CredentialsService {
             let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
             if normalized.contains("EZCLOUD_CONNECTION_CONFLICT") {
                 throw ServiceError.connectionConflict(normalized)
+            }
+            if normalized.contains("EZCLOUD_PROFILE_SETTINGS_CONFLICT") {
+                throw ServiceError.profileSettingsConflict(normalized)
+            }
+            if normalized.contains("EZCLOUD_CONNECTION_DELETED_SCOPE_CLEANUP_FAILED") {
+                throw ServiceError.connectionDeletedScopeCleanupFailed(normalized)
             }
             if normalized.contains("profile core changed since draft was loaded") {
                 throw ServiceError.profileCoreConflict(normalized)

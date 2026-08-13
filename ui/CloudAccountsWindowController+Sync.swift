@@ -37,24 +37,38 @@ extension CloudAccountsWindowController {
                     && editorName == name
                     && self.hasUnsavedConnectionChanges()
             },
+            canReviewConflict: { [weak self] provider, name in
+                guard let self else { return false }
+                return self.profileExists(name, provider: provider)
+            },
+            onReviewConflict: { [weak self] provider, name in
+                guard let self else { return }
+                if self.profile.allowsConnection(provider: provider, account: name) {
+                    self.refreshProfiles(selecting: name, provider: provider)
+                } else {
+                    // The conflicting credentials profile exists on this Mac
+                    // but is not visible in the fail-closed Workspace. Let the
+                    // user grant/review it explicitly before editing or
+                    // deleting it; never bypass the Workspace policy merely
+                    // to make the conflict button appear to work.
+                    self.openScopeSheet()
+                }
+            },
             onApplied: { [weak self] provider, names, addToWorkspace in
                 guard let self else { return nil }
+                defer { self.refreshAllWorkspacePolicies() }
                 if addToWorkspace {
-                    var settings = self.profile.cloudAccountsSettings
-                    var refs = Set(settings.accounts)
-                    names.forEach { refs.insert(AccountRef(provider: provider, account: $0)) }
-                    settings.accounts = Array(refs).sorted {
-                        $0.provider == $1.provider
-                            ? $0.account.localizedCaseInsensitiveCompare($1.account) == .orderedAscending
-                            : $0.provider < $1.provider
-                    }
                     do {
-                        let saved = try self.service.saveCloudAccountsSettings(
-                            profileID: self.profile.id,
-                            settings
-                        )
-                        self.profile = saved
-                        NotificationCenter.default.post(name: .profileDidChange, object: saved.id)
+                        var latest = self.profile
+                        for name in names {
+                            latest = try self.service.addConnectionToWorkspace(
+                                profileID: self.profile.id,
+                                provider: provider,
+                                account: name
+                            )
+                        }
+                        self.profile = latest
+                        NotificationCenter.default.post(name: .profileDidChange, object: latest.id)
                     } catch {
                         // The connection apply already succeeded; report the
                         // narrower scope failure honestly and keep every
@@ -66,13 +80,26 @@ extension CloudAccountsWindowController {
                         self.setStatus("Connections synced · workspace visibility update failed")
                         return "the workspace visibility setting could not be updated"
                     }
+                } else if let latest = try? self.service.refreshProfile(id: self.profile.id) {
+                    // Core may have removed a stale grant before recreating a
+                    // same-named GCP configuration. Always render the accepted
+                    // post-apply policy, even when the user did not grant the
+                    // imported Connection to this Workspace.
+                    self.profile = latest
+                    NotificationCenter.default.post(name: .profileDidChange, object: latest.id)
                 }
                 self.refreshProfiles(selecting: names.first, provider: provider)
                 self.setStatus("Connection sync complete")
                 return nil
             },
             onApplyFailure: { [weak self] in
-                self?.refreshProfiles()
+                guard let self else { return }
+                if let latest = try? self.service.refreshProfile(id: self.profile.id) {
+                    self.profile = latest
+                    NotificationCenter.default.post(name: .profileDidChange, object: latest.id)
+                }
+                self.refreshProfiles()
+                self.refreshAllWorkspacePolicies()
             },
             onDismiss: { [weak self] in
                 self?.connectionSyncController = nil

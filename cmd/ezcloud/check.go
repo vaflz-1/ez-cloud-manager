@@ -19,6 +19,7 @@ func checkCommand(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	providerID := fs.String("provider", defaultProvider, "provider id (aws, gcp, azure)")
 	profileName := fs.String("profile", "", "profile name")
+	workspaceID := fs.String("workspace", "", "owning Workspace profile id")
 	timeoutSec := fs.Int("timeout", 10, "seconds before the check is aborted")
 	_ = fs.Parse(args)
 	if *profileName == "" {
@@ -29,20 +30,19 @@ func checkCommand(args []string) {
 	if err != nil {
 		fail(err)
 	}
-	path, err := prov.DefaultPath()
-	if err != nil {
-		fail(err)
-	}
-
 	checker, ok := prov.(provider.Checker)
-	if !ok {
-		writeJSON(provider.CheckResult{OK: false, Error: fmt.Sprintf("%s does not support Test Connection yet", prov.DisplayName())})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSec)*time.Second)
-	defer cancel()
-	result, err := checker.Check(ctx, path, *profileName)
+	var result provider.CheckResult
+	err = withWorkspaceConnectionOperation(*workspaceID, prov.ID(), *profileName, false, func(operation workspaceConnectionOperation) error {
+		if !ok {
+			result = provider.CheckResult{OK: false, Error: fmt.Sprintf("%s does not support Test Connection yet", operation.Provider.DisplayName())}
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSec)*time.Second)
+		defer cancel()
+		var checkErr error
+		result, checkErr = checker.Check(ctx, operation.Path, *profileName)
+		return checkErr
+	})
 	if err != nil {
 		fail(err)
 	}

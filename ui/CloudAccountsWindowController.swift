@@ -64,6 +64,10 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
     var exportButton: NSPopUpButton!
     var detailEditorViews: [NSView] = []
     var detailEmptyStateView: NSView!
+    var detailEmptyStateTitleLabel: NSTextField!
+    var detailEmptyStateSubtitleLabel: NSTextField!
+    var detailEmptyScopeButton: NSButton!
+    var detailEmptyCreateButton: NSButton!
     var profileSearchField: NSSearchField!
     /// Lazily-created connector-owned browser login / synchronization sheet.
     /// Kept per Connections window so two Workspaces never share auth review
@@ -127,6 +131,11 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
     /// before they are allowed to touch the visible form.
     var editorContextGeneration = 0
     var editorBaseline: ConnectionEditorBaseline?
+    /// Set when a fresh Workspace snapshot revokes the currently-open saved
+    /// Connection. The draft remains visible for review, but secret reveal,
+    /// copy, editing and every provider action must stay disabled until the
+    /// target is explicitly granted again.
+    var selectedConnectionAccessRevoked = false
 
     /// Presentation layer over `fieldRows`: section headers + field references,
     /// so the flat model drives grouped, collapsible rows (Common/Advanced/…).
@@ -196,6 +205,60 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
         profile = updated
         window?.title = Product.toolTitle("Connections", workspace: updated.name)
         rebuildSidebarRows()
+        selectedConnectionAccessRevoked = selectedProfileName.map {
+            !updated.allowsConnection(provider: selectedProvider, account: $0)
+        } ?? false
+        if selectedConnectionAccessRevoked {
+            // Scope revocation invalidates every action attached to this
+            // selected target. A draft is preserved as a draft, but it cannot
+            // execute/export/activate/delete under the old grant.
+            lockSelectedConnectionAfterRevocation()
+        } else if selectedProfileName != nil {
+            setStatus("Workspace Connection access is current")
+        }
+        updateProfileMode()
+    }
+
+    func lockSelectedConnectionAfterRevocation() {
+        selectedConnectionAccessRevoked = true
+        for index in fieldRows.indices { fieldRows[index].revealed = false }
+        reloadFieldsTable()
+        setStatus("Connection access was removed from this Workspace")
+        updateProfileMode()
+    }
+
+    /// Revalidates a selected target from disk immediately before an action.
+    /// UI filtering is convenience; this check prevents a stale open editor
+    /// or sheet from continuing after another window revokes the grant.
+    func requireCurrentConnectionAuthorization(provider: String, name: String) -> Bool {
+        do {
+            guard try service.isConnectionAllowed(
+                profileID: profile.id,
+                provider: provider,
+                account: name
+            ) else {
+                if let latest = try? service.refreshProfile(id: profile.id) {
+                    updateOwningProfile(latest)
+                } else {
+                    lockSelectedConnectionAfterRevocation()
+                }
+                showError("“\(name)” is no longer allowed in this Workspace. Open Visible Connections to grant it again.")
+                rebuildSidebarRows()
+                return false
+            }
+            return true
+        } catch {
+            showError("Could not verify this Workspace’s Connection policy: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Creating, deleting or SSO-syncing a machine Connection can remove a
+    /// stale grant from more than the current Workspace. Ask the app owner for
+    /// one generation-gated disk snapshot so every open Workspace renders the
+    /// same accepted policy instead of waiting for a manual refresh.
+    func refreshAllWorkspacePolicies() {
+        NotificationCenter.default.post(name: .refreshWorkspaceStateRequested, object: nil)
     }
 
     /// The Profile Manager saved a change to this window's profile (name,

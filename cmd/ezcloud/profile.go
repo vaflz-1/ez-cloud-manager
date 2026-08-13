@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"ez-cloud-manager/internal/audit"
+	"ez-cloud-manager/internal/plugin"
 	"ez-cloud-manager/internal/profile"
+	"ez-cloud-manager/internal/provider"
 )
 
 // migrateResponse is the JSON shape for `ezcloud profile migrate`.
@@ -45,7 +48,7 @@ type profileSaveRequest struct {
 // — an unrelated, unchanged concept.
 func profileMgmtCommand(args []string) {
 	if len(args) < 1 {
-		fail(fmt.Errorf("usage: ezcloud profile list|show|create|save|rename|duplicate|delete|export|import|migrate|settings"))
+		fail(fmt.Errorf("usage: ezcloud profile list|show|create|save|rename|duplicate|delete|export|import|migrate|settings|connections"))
 	}
 	root, err := profile.DefaultRoot()
 	if err != nil {
@@ -214,9 +217,140 @@ func profileMgmtCommand(args []string) {
 		writeJSON(migrateResponse{Migrated: migrated})
 	case "settings":
 		profileSettingsCommand(rest, root)
+	case "connections":
+		profileConnectionsCommand(rest, root)
 	default:
 		fail(fmt.Errorf("unknown profile subcommand %q", sub))
 	}
+}
+
+// profileConnectionsCommand applies one-reference patches to the latest
+// Workspace policy. Unlike profile settings set, concurrent add/remove calls
+// never replace the complete cloud-accounts blob with a stale UI snapshot.
+func profileConnectionsCommand(args []string, root string) {
+	if len(args) < 1 {
+		fail(fmt.Errorf("usage: ezcloud profile connections add|remove|authorize --id ID --provider PROVIDER --account ACCOUNT"))
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("profile connections "+sub, flag.ExitOnError)
+	id := fs.String("id", "", "Workspace profile id")
+	providerID := fs.String("provider", "", "Connection provider id")
+	account := fs.String("account", "", "Connection name")
+	output := fs.String("output", "json", "output format (json only)")
+	_ = fs.Parse(rest)
+	requireJSONOutput(*output, "profile connections "+sub)
+	resolvedID := requireProfileID(*id)
+	if *providerID == "" || *account == "" {
+		fail(fmt.Errorf("--provider and --account are required"))
+	}
+	ref := profile.AccountRef{Provider: *providerID, Account: *account}
+
+	if sub == "authorize" {
+		workspace, err := profile.Get(root, resolvedID)
+		if err != nil {
+			fail(err)
+		}
+		writeJSON(struct {
+			Allowed bool `json:"allowed"`
+		}{Allowed: profile.AllowsConnection(workspace, ref)})
+		return
+	}
+
+	var (
+		saved profile.Profile
+		err   error
+	)
+	switch sub {
+	case "add":
+		saved, err = profile.AddConnectionRefVerified(root, resolvedID, ref, func(workspace profile.Profile) error {
+			return verifyWorkspaceConnectionExists(workspace, ref)
+		})
+	case "remove":
+		saved, err = profile.RemoveConnectionRef(root, resolvedID, ref)
+	default:
+		fail(fmt.Errorf("unknown profile connections subcommand %q", sub))
+	}
+	if err != nil {
+		fail(err)
+	}
+	// Connection names are identifiers rather than secret material, but keep
+	// the existing audit minimization convention: record the namespace only.
+	auditRecordKeys("profile-connection-"+sub, "", saved.Name, []string{"cloud-accounts"})
+	writeJSON(saved)
+}
+
+func verifyWorkspaceConnectionExists(workspace profile.Profile, ref profile.AccountRef) error {
+	backend, err := provider.Get(ref.Provider)
+	if err != nil {
+		return err
+	}
+	storePath, supported, err := workspaceConnectionStorePath(ref.Provider, workspace)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return fmt.Errorf("provider %q does not define Workspace store identity", ref.Provider)
+	}
+	restore, err := applyWorkspaceRoutingEnvironment(ref.Provider, workspace)
+	if err != nil {
+		return err
+	}
+	defer restore()
+	connections, err := backend.List(storePath)
+	if err != nil {
+		return err
+	}
+	for _, connection := range connections {
+		if connection.Name == strings.TrimSpace(ref.Account) {
+			return nil
+		}
+	}
+	return fmt.Errorf("connection %q does not exist in workspace %q provider store", ref.Account, workspace.Name)
+}
+
+func applyWorkspaceRoutingEnvironment(providerID string, workspace profile.Profile) (func(), error) {
+	values := map[string]string{}
+	for _, variable := range workspace.EnvVars {
+		values[variable.Key] = variable.Value
+	}
+	keys := []string{}
+	switch providerID {
+	case "aws":
+		keys = []string{"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"}
+	case "gcp":
+		keys = []string{"CLOUDSDK_CONFIG"}
+	case "azure":
+		return func() {}, nil
+	}
+	type previousValue struct {
+		value string
+		set   bool
+	}
+	previous := make(map[string]previousValue, len(keys))
+	restore := func() {
+		for _, key := range keys {
+			old := previous[key]
+			if old.set {
+				_ = os.Setenv(key, old.value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}
+	}
+	for _, key := range keys {
+		value, set := os.LookupEnv(key)
+		previous[key] = previousValue{value: value, set: set}
+		if workspaceValue := strings.TrimSpace(values[key]); workspaceValue != "" {
+			if err := os.Setenv(key, workspaceValue); err != nil {
+				restore()
+				return func() {}, err
+			}
+		} else if err := os.Unsetenv(key); err != nil {
+			restore()
+			return func() {}, err
+		}
+	}
+	return restore, nil
 }
 
 // profileSettingsCommand is the generic (any plugin id) per-plugin settings
@@ -232,6 +366,7 @@ func profileSettingsCommand(args []string, root string) {
 	fs := flag.NewFlagSet("profile settings "+sub, flag.ExitOnError)
 	id := fs.String("id", "", "profile id")
 	pluginID := fs.String("plugin", "", "plugin id (settings namespace)")
+	expectedUpdatedAt := fs.String("expected-updated-at", "", "Workspace updatedAt baseline (required for cloud-accounts set)")
 	output := fs.String("output", "json", "output format (json only)")
 	_ = fs.Parse(rest)
 	requireJSONOutput(*output, "profile settings "+sub)
@@ -256,7 +391,22 @@ func profileSettingsCommand(args []string, root string) {
 		if err != nil {
 			fail(err)
 		}
-		saved, err := profile.SetSettingsBlob(root, resolvedID, *pluginID, raw)
+		var saved profile.Profile
+		if *pluginID == plugin.CloudAccountsID {
+			saved, err = profile.SetCloudAccountsSettingsIfUnchangedVerified(
+				root, resolvedID, raw, *expectedUpdatedAt,
+				func(workspace profile.Profile, proposed profile.CloudAccountsSettings) error {
+					for _, ref := range proposed.Accounts {
+						if verifyErr := verifyWorkspaceConnectionExists(workspace, ref); verifyErr != nil {
+							return fmt.Errorf("refusing future Connection grant %s/%s: %w", ref.Provider, ref.Account, verifyErr)
+						}
+					}
+					return nil
+				},
+			)
+		} else {
+			saved, err = profile.SetSettingsBlob(root, resolvedID, *pluginID, raw)
+		}
 		if err != nil {
 			fail(err)
 		}

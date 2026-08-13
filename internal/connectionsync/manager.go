@@ -100,12 +100,29 @@ func (m *Manager) Login(ctx context.Context, providerID string, request LoginReq
 	}
 }
 
+// CreateGuard runs after a fresh discovery snapshot and all request
+// preconditions have been validated, but before a provider creates a new
+// Connection record. It lets the platform remove stale Workspace grants for a
+// previously deleted name without briefly exposing the new record through
+// those old permissions. Material identity replacement under an existing name
+// is rejected instead because it cannot share this cross-store transaction.
+//
+// A guard must be idempotent. It may run before a later provider CAS failure;
+// removing a stale grant is safe in that case, while restoring one is not.
+type CreateGuard func(providerID, storePath string, names []string) error
+
 func (m *Manager) Apply(ctx context.Context, providerID string, request ApplyRequest) (ApplyResponse, error) {
+	return m.ApplyGuarded(ctx, providerID, request, nil)
+}
+
+// ApplyGuarded is the platform-integrated variant of Apply. Package callers
+// that do not own Workspace authorization state can continue to use Apply.
+func (m *Manager) ApplyGuarded(ctx context.Context, providerID string, request ApplyRequest, guard CreateGuard) (ApplyResponse, error) {
 	switch providerID {
 	case "aws":
 		return m.applyAWS(request)
 	case "gcp":
-		return m.applyGCP(ctx, request)
+		return m.applyGCP(ctx, request, guard)
 	default:
 		return ApplyResponse{}, fmt.Errorf("provider %q does not support sign-in sync", providerID)
 	}

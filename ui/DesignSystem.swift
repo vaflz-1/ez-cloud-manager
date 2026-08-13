@@ -90,6 +90,11 @@ enum UI {
             weight: role == .primary ? .medium : .regular
         )
         button.keyEquivalentModifierMask = []
+        if role == .primary {
+            button.bezelColor = .controlAccentColor
+        } else {
+            button.bezelColor = nil
+        }
     }
 
     static func makeCard() -> NSBox {

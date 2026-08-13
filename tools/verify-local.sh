@@ -11,27 +11,35 @@ mkdir -p "$GOCACHE" "$GOTMPDIR" "$VERIFY_ROOT/swift-cache"
 
 cd "$PROJECT_DIR"
 
-echo "[1/8] Go tests"
+echo "[1/9] Go tests"
 go test -count=1 ./...
 
-echo "[2/8] Go race detector"
+echo "[2/9] Go race detector"
 go test -race -count=1 ./...
 
-echo "[3/8] Go vet"
+echo "[3/9] Go vet"
 go vet ./...
 
-echo "[4/8] Swift macOS 13 typecheck"
+echo "[4/9] Swift macOS 13 typecheck"
 swiftc -target "$(uname -m)-apple-macosx13.0" -warnings-as-errors \
   -file-prefix-map "$PROJECT_DIR=." -debug-prefix-map "$PROJECT_DIR=." \
   -module-cache-path "$VERIFY_ROOT/swift-cache" \
   -typecheck ui/*.swift -framework AppKit
 
-echo "[5/8] Metadata and shell validation"
+echo "[5/9] Connection scope policy smoke"
+swiftc -O -whole-module-optimization \
+  -target "$(uname -m)-apple-macosx13.0" \
+  -module-cache-path "$VERIFY_ROOT/swift-cache" \
+  tools/ConnectionScopePolicySmoke.swift ui/Models.swift \
+  -o "$VERIFY_ROOT/ConnectionScopePolicySmoke"
+"$VERIFY_ROOT/ConnectionScopePolicySmoke"
+
+echo "[6/9] Metadata and shell validation"
 plutil -lint Info.plist EZCloudManager.entitlements
 bash -n build.sh
 git diff --check
 
-echo "[6/8] Deterministic icon"
+echo "[7/9] Deterministic icon"
 ICON_CHECK_ROOT="$VERIFY_ROOT/icon-check"
 mkdir -p "$ICON_CHECK_ROOT/tools" "$ICON_CHECK_ROOT/assets"
 cp tools/generate-icon.swift "$ICON_CHECK_ROOT/tools/generate-icon.swift"
@@ -50,7 +58,7 @@ iconutil -c iconset assets/EZCloudManagerAppIcon.icns -o "$COMMITTED_ICONSET"
   exit 1
 }
 
-echo "[7/8] Local secret scan"
+echo "[8/9] Local secret scan"
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks dir . --redact --exit-code 1
   gitleaks git . --redact --exit-code 1
@@ -58,7 +66,7 @@ else
   echo "warning: gitleaks is not installed; secret scan skipped" >&2
 fi
 
-echo "[8/8] Process-boundary smoke"
+echo "[9/9] Process-boundary smoke"
 go build -trimpath -o "$VERIFY_ROOT/ezcloud" ./cmd/ezcloud
 swiftc -O -whole-module-optimization \
   -target "$(uname -m)-apple-macosx13.0" \

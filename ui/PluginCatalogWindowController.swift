@@ -134,13 +134,13 @@ final class PluginCatalogWindowController: NSWindowController, NSTableViewDataSo
         content.addSubview(statusLabel)
 
         let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(dismiss))
-        cancelButton.bezelStyle = .rounded
+        UI.style(cancelButton, as: .secondary)
         cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(cancelButton)
 
         applyButton = NSButton(title: "Save Changes", target: self, action: #selector(applyChanges))
-        applyButton.bezelStyle = .rounded
+        UI.style(applyButton, as: .primary)
         applyButton.keyEquivalent = "\r"
         applyButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(applyButton)

@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"ez-cloud-manager/internal/plugin"
 )
 
 func TestExportImportRoundtrip(t *testing.T) {
@@ -31,17 +33,16 @@ func TestExportImportRoundtrip(t *testing.T) {
 	if imported.ID == src.ID {
 		t.Fatal("import must assign a fresh id, not reuse the exported one")
 	}
-	srcAccounts := GetCloudAccountsSettings(src).Accounts
 	importedAccounts := GetCloudAccountsSettings(imported).Accounts
-	if len(importedAccounts) != 1 || importedAccounts[0] != srcAccounts[0] {
-		t.Fatalf("accounts not preserved: %+v", importedAccounts)
+	if len(importedAccounts) != 0 || GetCloudAccountsSettings(imported).ShowAllAccounts {
+		t.Fatalf("import inherited machine-specific Connection grants: %+v", importedAccounts)
 	}
 	if len(imported.EnvVars) != 1 || imported.EnvVars[0] != src.EnvVars[0] {
 		t.Fatalf("env vars not preserved: %+v", imported.EnvVars)
 	}
 }
 
-func TestExportImportPreservesShowAllAccountsAndEnabledPlugins(t *testing.T) {
+func TestExportImportResetsShowAllAccountsAndPreservesEnabledPlugins(t *testing.T) {
 	srcRoot := tmpRoot(t)
 	src := mustCreate(t, srcRoot, Profile{
 		Name:           "everything",
@@ -59,8 +60,8 @@ func TestExportImportPreservesShowAllAccountsAndEnabledPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if !GetCloudAccountsSettings(imported).ShowAllAccounts {
-		t.Fatal("showAllAccounts should survive export/import")
+	if GetCloudAccountsSettings(imported).ShowAllAccounts {
+		t.Fatal("showAllAccounts must reset on import so local Connections require explicit review")
 	}
 	if len(imported.EnabledPlugins) != 1 || imported.EnabledPlugins[0] != "ec2-launch-templates" {
 		t.Fatalf("enabledPlugins = %+v", imported.EnabledPlugins)
@@ -87,6 +88,31 @@ func TestImportIgnoresForgedIDVersionAndTimestamps(t *testing.T) {
 	}
 	if imported.CreatedAt == "1999-01-01T00:00:00Z" {
 		t.Fatal("import must stamp its own createdAt, not reuse the forged one")
+	}
+}
+
+func TestImportV4WithoutConnectionPolicyIsExplicitAllowNone(t *testing.T) {
+	root := tmpRoot(t)
+	var buf bytes.Buffer
+	if err := writeZip(&buf, map[string]string{
+		"profile.json": `{"name":"legacy-v4","version":4}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	imported, err := Import(root, bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	settings := GetCloudAccountsSettings(imported)
+	if settings.ShowAllAccounts || len(settings.Accounts) != 0 {
+		t.Fatalf("imported v4 policy = %+v, want explicit allow-none", settings)
+	}
+	if _, exists := imported.Settings[plugin.CloudAccountsID]; !exists {
+		t.Fatal("imported v4 profile omitted materialized Connection policy")
+	}
+	if AllowsConnection(imported, AccountRef{Provider: "aws", Account: "default"}) {
+		t.Fatal("imported v4 profile retained missing-policy show-all behavior")
 	}
 }
 

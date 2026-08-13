@@ -16,6 +16,7 @@ extension CloudAccountsWindowController {
         beginEditorContextChange()
         // Keep the provider of whatever group the user was looking at.
         selectedProfileName = nil
+        selectedConnectionAccessRevoked = false
         profileNameField.stringValue = ""
         pasteView.string = ""
         lastAutoParsedPaste = ""
@@ -62,6 +63,7 @@ extension CloudAccountsWindowController {
             showError("Select a connection first.")
             return
         }
+        guard requireCurrentConnectionAuthorization(provider: provider, name: name) else { return }
         if profileSummary(name, provider: provider)?.isReadOnly == true {
             showError("This connection is managed by the provider CLI. Change or remove it there, then Refresh Connections.")
             return
@@ -89,13 +91,62 @@ extension CloudAccountsWindowController {
         guard alert.runModal() == .alertFirstButtonReturn else {
             return
         }
+        // The modal runs a nested event loop; another Workspace window can
+        // revoke this Connection while the confirmation is visible.
+        guard requireCurrentConnectionAuthorization(provider: provider, name: name) else { return }
 
         do {
-            try service.delete(provider: provider, name, extraEnv: profile.envVars.asDictionary())
+            try service.delete(
+                provider: provider,
+                name,
+                workspaceID: profile.id,
+                extraEnv: profile.envVars.asDictionary()
+            )
+            var scopeFailure: String?
+            do {
+                if let saved = try removeConnectionFromWorkspaceScope(provider: provider, name: name) {
+                    profile = saved
+                    NotificationCenter.default.post(name: .profileDidChange, object: saved.id)
+                }
+            } catch {
+                // The provider-store delete is already committed. Never report
+                // this narrower settings failure as though the connection were
+                // still present.
+                scopeFailure = error.localizedDescription
+            }
             selectedProfileName = nil
             refreshProfiles()
+            refreshAllWorkspacePolicies()
             clearDetailForNoSelection()
-            setStatus("Deleted \(name)")
+            if let scopeFailure {
+                setStatus("Deleted \(name) · workspace visibility cleanup failed")
+                presentScopeUpdateWarning(
+                    completedAction: "Deleted \(name)",
+                    error: scopeFailure
+                )
+            } else {
+                setStatus("Deleted \(name)")
+            }
+        } catch CredentialsService.ServiceError.connectionDeletedScopeCleanupFailed(let message) {
+            // The provider record is already gone. Reconcile the current
+            // Workspace and UI, and never offer a destructive retry as if the
+            // delete itself had failed.
+            var localCleanupFailure: String?
+            do {
+                if let saved = try removeConnectionFromWorkspaceScope(provider: provider, name: name) {
+                    profile = saved
+                    NotificationCenter.default.post(name: .profileDidChange, object: saved.id)
+                }
+            } catch {
+                localCleanupFailure = error.localizedDescription
+            }
+            selectedProfileName = nil
+            refreshProfiles()
+            refreshAllWorkspacePolicies()
+            clearDetailForNoSelection()
+            setStatus("Deleted \(name) · some workspace grants need review")
+            let details = [message, localCleanupFailure].compactMap { $0 }.joined(separator: "\n")
+            presentScopeUpdateWarning(completedAction: "Deleted \(name)", error: details)
         } catch {
             // Safety net for the pre-check above (see +GuidedDelete.swift).
             if provider == "gcp", error.localizedDescription.contains("is the active gcloud configuration") {
@@ -208,6 +259,10 @@ extension CloudAccountsWindowController {
     }
 
     @objc func addVariable() {
+        guard !selectedConnectionAccessRevoked else {
+            showError("This Connection is no longer allowed in this Workspace.")
+            return
+        }
         guard !selectedConnectionIsReadOnly() else {
             showError("This connection is managed by the provider CLI and cannot be edited here.")
             return
@@ -227,6 +282,10 @@ extension CloudAccountsWindowController {
     }
 
     @objc func removeVariable() {
+        guard !selectedConnectionAccessRevoked else {
+            showError("This Connection is no longer allowed in this Workspace.")
+            return
+        }
         guard !selectedConnectionIsReadOnly() else {
             showError("This connection is managed by the provider CLI and cannot be edited here.")
             return
@@ -273,11 +332,16 @@ extension CloudAccountsWindowController {
         }
 
         let wasExisting = profileExists(name, provider: provider)
+        if wasExisting,
+           !requireCurrentConnectionAuthorization(provider: provider, name: name) {
+            return
+        }
         let updatesLoadedConnection = editorBaseline?.provider == provider
             && editorBaseline?.name == name
         let expectedFields = updatesLoadedConnection ? editorBaseline?.persistedFields : nil
         let expectAbsent = !updatesLoadedConnection
         let env = profile.envVars.asDictionary()
+        let workspaceProfileID = profile.id
         connectionSaveGeneration += 1
         let generation = connectionSaveGeneration
         let editorGeneration = editorContextGeneration
@@ -287,18 +351,56 @@ extension CloudAccountsWindowController {
             try self.service.save(
                 provider: provider,
                 name,
+                workspaceID: workspaceProfileID,
                 fields: fields,
                 expectedFields: expectedFields,
                 expectAbsent: expectAbsent,
                 extraEnv: env
             )
+            var scopedProfile: Profile?
+            var scopeFailure: String?
+            if !wasExisting {
+                do {
+                    scopedProfile = try self.service.addConnectionToWorkspace(
+                        profileID: workspaceProfileID,
+                        provider: provider,
+                        account: name
+                    )
+                } catch {
+                    // Connection creation succeeded. Return a partial-success
+                    // outcome instead of throwing and falsely telling the user
+                    // the provider store was not changed.
+                    scopeFailure = error.localizedDescription
+                }
+            }
+            return (scopedProfile: scopedProfile, scopeFailure: scopeFailure)
         }) { [weak self] result in
-            guard let self,
-                  generation == self.connectionSaveGeneration,
-                  editorGeneration == self.editorContextGeneration
-            else { return }
+            guard let self else { return }
+            let editorStillCurrent = generation == self.connectionSaveGeneration
+                && editorGeneration == self.editorContextGeneration
             switch result {
-            case .success:
+            case .success(let outcome):
+            self.refreshAllWorkspacePolicies()
+            if let scopedProfile = outcome.scopedProfile {
+                self.profile = scopedProfile
+                NotificationCenter.default.post(name: .profileDidChange, object: scopedProfile.id)
+            }
+            if !editorStillCurrent {
+                // The mutation may have committed after the user moved to a
+                // different editor context. Reconcile real state and report
+                // any partial success, but never bind the old fields into the
+                // newly-selected editor.
+                self.refreshProfiles()
+                if let scopeFailure = outcome.scopeFailure {
+                    self.presentScopeUpdateWarning(
+                        completedAction: wasExisting ? "Updated \(name)" : "Created \(name)",
+                        error: scopeFailure
+                    )
+                } else {
+                    self.setStatus(wasExisting ? "Updated \(name)" : "Created \(name)")
+                }
+                return
+            }
             let savedCount = fields.values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
             selectedProvider = provider
             selectedProfileName = name
@@ -321,7 +423,15 @@ extension CloudAccountsWindowController {
                 profilesTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             }
             updateProfileMode()
-            setStatus(wasExisting ? "Updated \(name) · \(savedCount) field(s)" : "Created \(name) · \(savedCount) field(s)")
+            if let scopeFailure = outcome.scopeFailure {
+                setStatus("Created \(name) · workspace visibility update failed")
+                presentScopeUpdateWarning(
+                    completedAction: "Created \(name)",
+                    error: scopeFailure
+                )
+            } else {
+                setStatus(wasExisting ? "Updated \(name) · \(savedCount) field(s)" : "Created \(name) · \(savedCount) field(s)")
+            }
             case .failure(CredentialsService.ServiceError.connectionConflict):
                 updateProfileMode()
                 setStatus("Save blocked · \(name) changed outside this editor")
@@ -333,9 +443,49 @@ extension CloudAccountsWindowController {
         }
     }
 
+    /// Removes a stale provider/account reference after the provider store has
+    /// already deleted the connection. This is intentionally independent of
+    /// `showAllAccounts`: a workspace can later return to scoped mode, so stale
+    /// hidden references should not survive while "show all" is enabled.
+    func removeConnectionFromWorkspaceScope(provider: String, name: String) throws -> Profile? {
+        try service.removeConnectionFromWorkspace(
+            profileID: profile.id,
+            provider: provider,
+            account: name
+        )
+    }
+
+    func sortedAccountRefs(_ refs: Set<AccountRef>) -> [AccountRef] {
+        refs.sorted {
+            $0.provider == $1.provider
+                ? $0.account.localizedCaseInsensitiveCompare($1.account) == .orderedAscending
+                : $0.provider < $1.provider
+        }
+    }
+
+    /// Provider-store mutation has succeeded, while only the Workspace's
+    /// visibility metadata failed. Use a dedicated partial-success message so
+    /// retrying the original destructive operation is never suggested.
+    func presentScopeUpdateWarning(completedAction: String, error: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(completedAction), but this workspace was not updated"
+        alert.informativeText = "The connection-store change is complete. Visible Connections could not be updated: \(error)"
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     /// Copies the selected row's real value (even if masked in the table) to the
     /// clipboard — the intended way to hand a secret to another app.
     @objc func copyFieldValue() {
+        guard !selectedConnectionAccessRevoked else {
+            showError("This Connection is no longer allowed in this Workspace, so its values cannot be copied.")
+            return
+        }
+        if let name = selectedProfileName,
+           !requireCurrentConnectionAuthorization(provider: selectedProvider, name: name) {
+            return
+        }
         let disp = fieldsTable.selectedRow
         guard disp >= 0, disp < displayItems.count, case .field(let idx) = displayItems[disp] else {
             showError("Select a variable row to copy its value.")

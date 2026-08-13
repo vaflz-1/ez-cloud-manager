@@ -29,6 +29,46 @@ type awsCheckSnapshot struct {
 	expectedAccount string
 }
 
+// ExecutionSnapshot is a captured, private AWS profile used by feature
+// operations after the Platform has authorized a Connection. It deliberately
+// exposes only sanitized file paths: callers cannot accidentally pass the raw
+// mutable config/credentials files to the AWS CLI after validation.
+type ExecutionSnapshot struct {
+	inner awsCheckSnapshot
+}
+
+// PrepareExecutionSnapshot captures one direct-credential or managed SSO
+// profile and rejects delegated credential helpers, role/source chaining,
+// endpoint routing and custom trust settings. The returned files are 0700/0600
+// and immutable for the lifetime of the request.
+func PrepareExecutionSnapshot(credentialsPath, configPath, name string) (*ExecutionSnapshot, error) {
+	snapshot, err := prepareAWSCheckSnapshot(credentialsPath, configPath, name)
+	if err != nil {
+		return nil, err
+	}
+	return &ExecutionSnapshot{inner: snapshot}, nil
+}
+
+// VendorOverrides returns the only AWS configuration paths a feature runner
+// may pass to the vendor CLI.
+func (s *ExecutionSnapshot) VendorOverrides() map[string]string {
+	if s == nil {
+		return nil
+	}
+	return map[string]string{
+		"AWS_CONFIG_FILE":             s.inner.configPath,
+		"AWS_SHARED_CREDENTIALS_FILE": s.inner.credentialsPath,
+	}
+}
+
+// Close removes the private captured files.
+func (s *ExecutionSnapshot) Close() error {
+	if s == nil {
+		return nil
+	}
+	return s.inner.cleanup()
+}
+
 func (s *awsCheckSnapshot) cleanup() error {
 	if s.root == "" {
 		return nil

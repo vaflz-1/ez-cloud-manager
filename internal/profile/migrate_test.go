@@ -110,8 +110,12 @@ func TestMigrateFreshInstallCreatesDefaultProfile(t *testing.T) {
 	if len(list) != 1 || list[0].Name != "Default" {
 		t.Fatalf("expected a single Default profile, got %+v", list)
 	}
-	if !GetCloudAccountsSettings(list[0]).ShowAllAccounts {
-		t.Fatal("Default profile should show all accounts")
+	settings := GetCloudAccountsSettings(list[0])
+	if settings.ShowAllAccounts || len(settings.Accounts) != 0 {
+		t.Fatalf("fresh Default must allow no connections, got %+v", settings)
+	}
+	if AllowsConnection(list[0], AccountRef{Provider: "aws", Account: "prod"}) {
+		t.Fatal("fresh Default unexpectedly allowed an AWS connection")
 	}
 }
 
@@ -139,7 +143,7 @@ func TestMigrateSkipsWorkspaceNameAlreadyPresent(t *testing.T) {
 // TestMigrateFromWorkspacesPreEnablesCloudAccounts covers a P1 edge case in
 // the v1.1 -> v2.0 migration path: a profile created HERE (from a real
 // legacy workspace, with real account references) is written via Create,
-// which always stamps currentVersion (2) — so it never takes the Version<2
+// which always stamps currentVersion — so it never takes the Version<2
 // branch in readProfile that auto-enables cloud-accounts for a pre-P1
 // profile already on disk (see profile.go). Without an explicit pre-enable
 // in the per-workspace loop itself, a user whose very first ezcloud launch

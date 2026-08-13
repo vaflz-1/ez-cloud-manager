@@ -9,6 +9,8 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+
+	"ez-cloud-manager/internal/plugin"
 )
 
 const (
@@ -119,6 +121,19 @@ func Import(root string, r io.Reader) (imported Profile, err error) {
 	if err := json.Unmarshal(profileData, &incoming); err != nil {
 		return Profile{}, fmt.Errorf("parse profile.json: %w", err)
 	}
+	// Connection grants are machine/store identities, not portable profile
+	// preferences. An archive from another machine must never authorize local
+	// same-named credentials (and show-all must never expose every local
+	// Connection). Preserve other add-on settings, but require an explicit
+	// rebind through Visible Connections after import.
+	allowNone, err := json.Marshal(CloudAccountsSettings{})
+	if err != nil {
+		return Profile{}, fmt.Errorf("materialize imported Connection policy: %w", err)
+	}
+	if incoming.Settings == nil {
+		incoming.Settings = make(map[string]json.RawMessage)
+	}
+	incoming.Settings[plugin.CloudAccountsID] = allowNone
 
 	// Parsing and zip-bomb validation above deliberately happen outside the
 	// root lock. Only the name snapshot plus final create need serialization.

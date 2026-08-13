@@ -213,6 +213,43 @@ func TestConcurrentTargetedMutationsSerializeAndPreserveIndependentFields(t *tes
 	}
 }
 
+func TestConcurrentConnectionRefMutationsPreserveLatestState(t *testing.T) {
+	root := tmpRoot(t)
+	stale := AccountRef{Provider: "aws", Account: "stale"}
+	freshA := AccountRef{Provider: "aws", Account: "fresh-a"}
+	freshB := AccountRef{Provider: "gcp", Account: "fresh-b"}
+	a := mustCreate(t, root, Profile{Name: "a", Settings: cloudAccountsSettingsJSON(t, CloudAccountsSettings{
+		Accounts: []AccountRef{stale},
+	})})
+	b := mustCreate(t, root, Profile{Name: "b", Settings: cloudAccountsSettingsJSON(t, CloudAccountsSettings{
+		Accounts: []AccountRef{stale},
+	})})
+
+	errs := runWhileRootLocked(t, root,
+		func() error { _, err := AddConnectionRef(root, a.ID, freshA); return err },
+		func() error { _, err := AddConnectionRef(root, a.ID, freshB); return err },
+		func() error {
+			return RemoveConnectionRefFromMatching(root, stale, func(Profile) (bool, error) { return true, nil })
+		},
+	)
+	assertSuccessCount(t, errs, 3)
+
+	reloadedA, err := Get(root, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if AllowsConnection(reloadedA, stale) || !AllowsConnection(reloadedA, freshA) || !AllowsConnection(reloadedA, freshB) {
+		t.Fatalf("concurrent mutations lost or resurrected refs: %+v", GetCloudAccountsSettings(reloadedA))
+	}
+	reloadedB, err := Get(root, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if AllowsConnection(reloadedB, stale) {
+		t.Fatalf("global cleanup missed workspace b: %+v", GetCloudAccountsSettings(reloadedB))
+	}
+}
+
 // TestConcurrentNameOperationsPreserveUniqueNames holds the root lock until
 // both contenders have entered their public operation. That makes the race
 // deterministic: both must wait, then observe one another's committed result

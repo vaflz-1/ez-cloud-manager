@@ -111,7 +111,7 @@ func (gcpProvider) Activate(path, name string) error {
 	return gcpcreds.Activate(path, name)
 }
 
-func (gcpProvider) ActivateLabel() string { return "Set as active gcloud configuration" }
+func (gcpProvider) ActivateLabel() string { return "Activate globally in gcloud" }
 
 // Check captures the selected configuration into a temporary non-active
 // configuration containing only core.account/core.project. gcloud still owns

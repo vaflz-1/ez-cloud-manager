@@ -22,9 +22,9 @@ const migratedMarker = ".migrated"
 // per legacy Workspace not already present by name.
 //
 // If the result would be zero profiles (fresh install, or an empty/absent
-// legacy file), it creates a single "Default" profile with the cloud-accounts
-// plugin's ShowAllAccounts settings blob set, so the app is never left
-// without one: every window must bind to exactly one profile.
+// legacy file), it creates a single fail-closed "Default" profile, so the app
+// is never left without one while no discovered Connection is silently made
+// available to a new Workspace.
 func MigrateFromWorkspaces(root string) (int, error) {
 	markerPath := filepath.Join(root, migratedMarker)
 	if _, err := os.Stat(markerPath); err == nil {
@@ -82,7 +82,7 @@ func MigrateFromWorkspaces(root string) (int, error) {
 	}
 
 	if len(existing) == 0 {
-		blob, err := json.Marshal(CloudAccountsSettings{ShowAllAccounts: true})
+		blob, err := json.Marshal(CloudAccountsSettings{})
 		if err != nil {
 			return migrated, err
 		}

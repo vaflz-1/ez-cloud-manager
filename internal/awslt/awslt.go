@@ -76,11 +76,26 @@ func defaultRunner(args []string, stdin []byte) ([]byte, error) {
 // not returned because it may contain account metadata or credential-helper
 // output.
 func runAWS(bin string, args []string, stdin []byte) ([]byte, error) {
+	return runAWSWithOverrides(bin, args, stdin, nil)
+}
+
+func runAWSWithOverrides(bin string, args []string, stdin []byte, requestOverrides map[string]string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), awsCommandTimeout)
 	defer cancel()
-	overrides, err := awsVendorOverrides()
-	if err != nil {
-		return nil, err
+	overrides := make(map[string]string, len(requestOverrides)+3)
+	if requestOverrides == nil {
+		var err error
+		overrides, err = awsVendorOverrides()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		for key, value := range requestOverrides {
+			overrides[key] = value
+		}
+		overrides["AWS_CLI_AUTO_PROMPT"] = "off"
+		overrides["AWS_EC2_METADATA_DISABLED"] = "true"
+		overrides["AWS_PAGER"] = ""
 	}
 	result, runErr := provider.RunVendorCommandWithInput(
 		ctx, bin, args, overrides, stdin, maxAWSOutputBytes,
@@ -119,13 +134,34 @@ type Client struct {
 	Profile string
 	Region  string
 	Run     Runner
+	// Environment must contain captured/sanitized AWS_CONFIG_FILE and
+	// AWS_SHARED_CREDENTIALS_FILE paths for Platform-authorized feature calls.
+	// Tests that inject Run do not execute the vendor boundary.
+	Environment map[string]string
 }
 
 func (c Client) runner() Runner {
 	if c.Run != nil {
 		return c.Run
 	}
-	return defaultRunner
+	configPath := strings.TrimSpace(c.Environment["AWS_CONFIG_FILE"])
+	credentialsPath := strings.TrimSpace(c.Environment["AWS_SHARED_CREDENTIALS_FILE"])
+	if configPath == "" || credentialsPath == "" {
+		return func([]string, []byte) ([]byte, error) {
+			return nil, errors.New("Launch Templates requires an isolated AWS Connection snapshot")
+		}
+	}
+	overrides := make(map[string]string, len(c.Environment))
+	for key, value := range c.Environment {
+		overrides[key] = value
+	}
+	return func(args []string, stdin []byte) ([]byte, error) {
+		bin, err := resolveAWS()
+		if err != nil {
+			return nil, errNoCLI
+		}
+		return runAWSWithOverrides(bin, args, stdin, overrides)
+	}
 }
 
 // Template is a summary row from describe-launch-templates.

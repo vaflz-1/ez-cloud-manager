@@ -12,6 +12,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     private let workspaceIsScoped: Bool
     private let workspaceConnections: Set<AccountRef>
     private let conflictsWithOpenDraft: (String, String) -> Bool
+    private let canReviewConflict: (String, String) -> Bool
+    private let onReviewConflict: (String, String) -> Void
     /// Returns a non-fatal post-apply warning (for example a Workspace scope
     /// update failure). Connection writes have already succeeded at this point.
     private let onApplied: (String, [String], Bool) -> String?
@@ -27,9 +29,9 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     private var dismissed = false
     private var closeAfterApply = false
     private var closeParentAfterApply = false
-    private var hasSizedForSnapshot = false
 
     private let providerPopup = NSPopUpButton()
+    private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
     private let searchField = NSSearchField()
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -44,6 +46,9 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var scrollHeightConstraint: NSLayoutConstraint?
+    private weak var rootStack: NSStackView?
+    private var blockedPanel: NSStackView?
+    private var blockedReviewTarget: (provider: String, name: String)?
 
     init(
         providerID: String,
@@ -54,6 +59,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         extraEnv: [String: String],
         service: CredentialsService,
         conflictsWithOpenDraft: @escaping (String, String) -> Bool,
+        canReviewConflict: @escaping (String, String) -> Bool,
+        onReviewConflict: @escaping (String, String) -> Void,
         onApplied: @escaping (String, [String], Bool) -> String?,
         onApplyFailure: @escaping () -> Void,
         onDismiss: @escaping () -> Void
@@ -65,6 +72,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         self.workspaceIsScoped = workspaceIsScoped
         self.workspaceConnections = workspaceConnections
         self.conflictsWithOpenDraft = conflictsWithOpenDraft
+        self.canReviewConflict = canReviewConflict
+        self.onReviewConflict = onReviewConflict
         self.onApplied = onApplied
         self.onApplyFailure = onApplyFailure
         self.onDismiss = onDismiss
@@ -112,12 +121,14 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
 
     private func buildWindow(initialProviderID: String) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 510),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 430),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
         window.title = "Sign In & Sync Connections"
+        window.minSize = NSSize(width: 640, height: 400)
+        window.maxSize = NSSize(width: 840, height: 780)
         self.window = window
 
         let root = NSView()
@@ -128,10 +139,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         title.setAccessibilityRole(.staticText)
 
-        let subtitle = NSTextField(wrappingLabelWithString:
-            "The cloud CLI owns the session. Kervik receives connection names and project/account metadata — never OAuth or SSO tokens."
-        )
-        subtitle.textColor = .secondaryLabelColor
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.maximumNumberOfLines = 3
 
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
@@ -216,14 +225,15 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         actions.spacing = 8
         actions.views[1].setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [title, subtitle, topControls, scroll, addToWorkspaceCheckbox, statusRow, actions])
+        let stack = NSStackView(views: [title, subtitleLabel, topControls, scroll, addToWorkspaceCheckbox, statusRow, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
+        rootStack = stack
 
-        subtitle.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         topControls.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -238,6 +248,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
         ])
+        updateProviderExplanation()
         updateControls()
     }
 
@@ -274,7 +285,17 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         selectedIDs.removeAll()
         filteredCandidates.removeAll()
         tableView.reloadData()
+        updateProviderExplanation()
         discover()
+    }
+
+    private func updateProviderExplanation() {
+        if currentProvider == "aws" {
+            subtitleLabel.stringValue = "AWS sign-in lists configured IAM Identity Center profiles only. Existing access-key Connections are already in the sidebar. The AWS CLI keeps all SSO tokens."
+        } else {
+            subtitleLabel.stringValue = "Google Cloud sign-in discovers projects available to the signed-in account. gcloud keeps all OAuth tokens; Kervik receives project metadata only."
+        }
+        subtitleLabel.setAccessibilityLabel(subtitleLabel.stringValue)
     }
 
     @objc private func modeChanged() {
@@ -489,43 +510,26 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         } else {
             normalized = snapshot
         }
-        let displaySnapshot = ConnectionAuthSnapshot(
-            protocolVersion: normalized.protocolVersion,
-            provider: normalized.provider,
-            revision: normalized.revision,
-            candidates: normalized.candidates.map { candidate in
-                guard !candidate.canApply else { return candidate }
-                return ConnectionAuthCandidate(
-                    id: candidate.id,
-                    name: candidate.name,
-                    displayName: candidate.displayName,
-                    sourceProfile: candidate.sourceProfile,
-                    authMode: candidate.authMode,
-                    principal: candidate.principal,
-                    accountID: candidate.accountID,
-                    roleName: candidate.roleName,
-                    projectID: candidate.projectID,
-                    region: candidate.region,
-                    status: "conflict",
-                    canApply: false,
-                    reason: candidate.reason
-                )
-            },
-            warnings: normalized.warnings
-        )
+        // Keep the core's actual status. A blocked row is not necessarily a
+        // name collision: invalid SSO metadata, delegated credentials or
+        // endpoint/trust overrides all require different remediation.
+        let displaySnapshot = normalized
         self.snapshot = displaySnapshot
         let applicable = Set(displaySnapshot.candidates.filter(\.canApply).map(\.id))
         selectedIDs = requestedIDs.map { $0.intersection(applicable) } ?? applicable
+        updateBlockedPanel(for: displaySnapshot)
         rebuildFilter()
-        if !hasSizedForSnapshot {
-            let visibleRows = max(1, min(6, displaySnapshot.candidates.count))
-            scrollHeightConstraint?.constant = CGFloat(visibleRows * 72 + 2)
-            window?.setContentSize(NSSize(
-                width: 720,
-                height: 332 + (scrollHeightConstraint?.constant ?? 74)
-            ))
-            hasSizedForSnapshot = true
-        }
+        // Provider switches may change one AWS row into dozens of GCP rows.
+        // Re-size for every accepted provider snapshot (never for each search
+        // keystroke), while keeping 1...6 rows visible and the remainder
+        // scrollable.
+        let visibleRows = max(1, min(6, displaySnapshot.candidates.count))
+        scrollHeightConstraint?.constant = CGFloat(visibleRows * 72 + 2)
+        rootStack?.layoutSubtreeIfNeeded()
+        let intrinsicHeight = rootStack?.fittingSize.height ?? 400
+        let visibleHeight = window?.sheetParent?.screen?.visibleFrame.height ?? 760
+        let desiredHeight = min(max(400, intrinsicHeight + 40), visibleHeight - 72)
+        window?.setContentSize(NSSize(width: 720, height: desiredHeight))
         let blocked = displaySnapshot.candidates.count - applicable.count
         let noun = displaySnapshot.provider == "aws" ? "AWS SSO profile" : "GCP project"
         let plural = displaySnapshot.candidates.count == 1 ? "" : "s"
@@ -546,6 +550,76 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         }
         tableView.reloadData()
         updateControls()
+    }
+
+    private func updateBlockedPanel(for snapshot: ConnectionAuthSnapshot) {
+        if let blockedPanel {
+            rootStack?.removeArrangedSubview(blockedPanel)
+            blockedPanel.removeFromSuperview()
+        }
+        blockedPanel = nil
+        blockedReviewTarget = nil
+
+        let blocked = snapshot.candidates.filter { !$0.canApply }
+        guard !blocked.isEmpty, let rootStack else { return }
+
+        let icon = NSImageView(image: NSImage(
+            systemSymbolName: "exclamationmark.triangle.fill",
+            accessibilityDescription: "Blocked connection"
+        ) ?? NSImage())
+        icon.contentTintColor = .systemOrange
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let headline = NSTextField(labelWithString:
+            blocked.count == 1 ? "1 connection is blocked" : "\(blocked.count) connections are blocked")
+        headline.font = .systemFont(ofSize: 12, weight: .semibold)
+        let remedy = NSTextField(wrappingLabelWithString:
+            blocked.first?.reason ?? "Resolve the provider configuration conflict, then discover again.")
+        remedy.font = .systemFont(ofSize: 11)
+        remedy.textColor = .secondaryLabelColor
+        remedy.maximumNumberOfLines = 3
+        let copy = NSStackView(views: [headline, remedy])
+        copy.orientation = .vertical
+        copy.alignment = .leading
+        copy.spacing = 3
+
+        var panelViews: [NSView] = [icon, copy]
+        if let target = blocked.first(where: { candidate in
+            let name = candidate.sourceProfile ?? candidate.name
+            return isNameConflict(candidate) && canReviewConflict(snapshot.provider, name)
+        }) {
+            let review = NSButton(title: "Review Existing Connection…", target: self, action: #selector(reviewBlockedConnection))
+            UI.style(review, as: .secondary)
+            review.setContentHuggingPriority(.required, for: .horizontal)
+            panelViews += [NSView(), review]
+            blockedReviewTarget = (snapshot.provider, target.sourceProfile ?? target.name)
+        }
+
+        let panel = NSStackView(views: panelViews)
+        panel.orientation = .horizontal
+        panel.alignment = .top
+        panel.spacing = 9
+        panel.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        panel.wantsLayer = true
+        panel.layer?.cornerRadius = 8
+        panel.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.10).cgColor
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        rootStack.insertArrangedSubview(panel, at: min(4, rootStack.arrangedSubviews.count))
+        panel.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+        blockedPanel = panel
+    }
+
+    private func isNameConflict(_ candidate: ConnectionAuthCandidate) -> Bool {
+        candidate.reason?.localizedCaseInsensitiveContains("same name") == true
+            || candidate.reason?.localizedCaseInsensitiveContains("credentials-file profile") == true
+    }
+
+    @objc private func reviewBlockedConnection() {
+        guard let target = blockedReviewTarget else { return }
+        closeSheet()
+        DispatchQueue.main.async { [onReviewConflict] in
+            onReviewConflict(target.provider, target.name)
+        }
     }
 
     private func startOperation<T>(
@@ -594,8 +668,10 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         searchField.isEnabled = snapshot != nil && !busy && !applying
         tableView.isEnabled = !busy && !applying
         modePopup.isEnabled = snapshot != nil && !busy && !applying
-        let canSignIn = currentProvider == "gcp" || (snapshot != nil && !selectedIDs.isEmpty)
+        let hasApplicableCandidates = snapshot?.candidates.contains(where: \.canApply) ?? false
+        let canSignIn = currentProvider == "gcp" || (snapshot != nil && !selectedIDs.isEmpty && hasApplicableCandidates)
         signInButton.isEnabled = canSignIn && !busy && !applying
+        signInButton.title = currentProvider == "aws" ? "Sign In to AWS" : "Sign In to Google Cloud"
         let hasApplicable = snapshot.map { !candidatesForCurrentMode(in: $0).isEmpty } ?? false
         applyButton.isEnabled = hasApplicable && !busy && !applying
         let count = snapshot.map { candidatesForCurrentMode(in: $0).count } ?? 0
@@ -635,6 +711,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
 
 private final class ConnectionAuthCandidateCell: NSTableCellView {
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let nameLabel = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
     private let status = NSTextField(labelWithString: "")
 
@@ -644,6 +721,9 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
         checkbox.target = target
         checkbox.action = action
         checkbox.translatesAutoresizingMaskIntoConstraints = false
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitle.textColor = .secondaryLabelColor
         subtitle.font = .systemFont(ofSize: 11)
         subtitle.maximumNumberOfLines = 2
@@ -653,19 +733,23 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
         status.alignment = .right
         status.translatesAutoresizingMaskIntoConstraints = false
         addSubview(checkbox)
+        addSubview(nameLabel)
         addSubview(subtitle)
         addSubview(status)
         NSLayoutConstraint.activate([
             checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             checkbox.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            checkbox.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -8),
-            subtitle.leadingAnchor.constraint(equalTo: checkbox.leadingAnchor, constant: 20),
-            subtitle.topAnchor.constraint(equalTo: checkbox.bottomAnchor, constant: 3),
+            checkbox.widthAnchor.constraint(equalToConstant: 18),
+            nameLabel.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 6),
+            nameLabel.centerYAnchor.constraint(equalTo: checkbox.centerYAnchor),
+            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -8),
+            subtitle.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
+            subtitle.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 3),
             subtitle.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -7),
             subtitle.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -8),
             status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             status.centerYAnchor.constraint(equalTo: centerYAnchor),
-            status.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
+            status.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
         ])
     }
 
@@ -673,17 +757,27 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
 
     func configure(candidate: ConnectionAuthCandidate, checked: Bool, row: Int) {
         checkbox.tag = row
-        checkbox.title = candidate.displayName
+        checkbox.title = ""
         checkbox.state = checked ? .on : .off
         checkbox.isEnabled = candidate.canApply && candidate.status != "conflict"
+        nameLabel.stringValue = candidate.displayName
+        nameLabel.textColor = .labelColor
         let details = [candidate.targetDescription, candidate.roleName, candidate.principal]
             .compactMap { value in value.flatMap { $0.isEmpty ? nil : $0 } }
             .joined(separator: " · ")
         subtitle.stringValue = candidate.reason ?? details
-        status.stringValue = candidate.status == "conflict" ? "Name conflict" : candidate.statusTitle
-        status.textColor = candidate.status == "conflict" ? .systemOrange : .secondaryLabelColor
+        let reason = candidate.reason ?? ""
+        let nameConflict = reason.localizedCaseInsensitiveContains("same name")
+            || reason.localizedCaseInsensitiveContains("credentials-file profile")
+        let renderedStatus = candidate.canApply
+            ? candidate.statusTitle
+            : (nameConflict ? "Name conflict" : "Needs review")
+        status.stringValue = renderedStatus
+        status.textColor = candidate.canApply ? .secondaryLabelColor : .systemOrange
         checkbox.toolTip = candidate.canApply ? nil : candidate.reason
+        checkbox.setAccessibilityLabel(candidate.displayName)
+        checkbox.setAccessibilityHelp(candidate.reason ?? "\(details). \(renderedStatus).")
         subtitle.toolTip = candidate.reason ?? details
-        setAccessibilityLabel("\(candidate.displayName), \(details), \(candidate.statusTitle)")
+        setAccessibilityLabel("\(candidate.displayName), \(details), \(renderedStatus)")
     }
 }

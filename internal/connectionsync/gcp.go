@@ -279,6 +279,8 @@ func (m *Manager) buildGCPSnapshot(principal string, projects []gcloudProject) (
 				candidate.Status = StatusUnchanged
 			} else {
 				candidate.Status = StatusUpdate
+				candidate.CanApply = false
+				candidate.Reason = "This configuration name already belongs to a different Google identity or project; create a new configuration name or review it manually."
 			}
 			if hasUnsafeGCPRoutingOverride(profile.Fields) {
 				candidate.CanApply = false
@@ -380,7 +382,7 @@ func (m *Manager) loginGCP(ctx context.Context) (response LoginResponse, resultE
 	return LoginResponse{Provider: "gcp", OK: true, LoggedIn: 1, Snapshot: snapshot}, nil
 }
 
-func (m *Manager) applyGCP(ctx context.Context, request ApplyRequest) (ApplyResponse, error) {
+func (m *Manager) applyGCP(ctx context.Context, request ApplyRequest, createGuard CreateGuard) (ApplyResponse, error) {
 	if request.ExpectedRevision == "" || !validGCPPrincipal(request.Principal) {
 		return ApplyResponse{}, fmt.Errorf("expectedRevision and principal are required")
 	}
@@ -424,11 +426,20 @@ func (m *Manager) applyGCP(ctx context.Context, request ApplyRequest) (ApplyResp
 	results := []ApplyResult{}
 	response := ApplyResponse{Provider: "gcp", Revision: snapshot.Revision, Results: results}
 	changes := []gcpcreds.ConditionalSave{}
+	newNames := []string{}
 	for _, candidate := range snapshot.Candidates {
 		if !selected[candidate.ID] {
 			continue
 		}
 		candidateState := state.Candidates[candidate.ID]
+		// Replacing core.account/core.project under an existing configuration
+		// name would require one transaction spanning Workspace grants and the
+		// gcloud store. Those live under independent locks, leaving an unavoidable
+		// cleanup-to-write TOCTOU window. Reject the replacement instead of trying
+		// to revoke and reuse the name.
+		if gcpMaterialIdentityChanged(candidateState) {
+			return ApplyResponse{}, fmt.Errorf("refusing to replace the Google identity or project behind existing configuration %q; create a new configuration name or review it manually", candidate.Name)
+		}
 		if !candidate.CanApply {
 			return ApplyResponse{}, fmt.Errorf("selected Google Cloud configuration requires manual review")
 		}
@@ -447,6 +458,7 @@ func (m *Manager) applyGCP(ctx context.Context, request ApplyRequest) (ApplyResp
 		if candidate.Status == StatusNew {
 			action = "added"
 			response.Added++
+			newNames = append(newNames, candidate.Name)
 		} else {
 			response.Updated++
 		}
@@ -454,8 +466,31 @@ func (m *Manager) applyGCP(ctx context.Context, request ApplyRequest) (ApplyResp
 			CandidateID: candidate.ID, Name: candidate.Name, Action: action,
 		})
 	}
+	if createGuard != nil && len(newNames) > 0 {
+		sort.Strings(newNames)
+		if err := createGuard("gcp", m.gcpConfigRoot, newNames); err != nil {
+			return ApplyResponse{}, fmt.Errorf("prepare new Google Cloud connection scope: %w", err)
+		}
+	}
 	if err := batchSaver.SaveBatchIfUnchanged(m.gcpConfigRoot, changes); err != nil {
 		return ApplyResponse{}, fmt.Errorf("sync gcloud configurations: %w", err)
 	}
 	return response, nil
+}
+
+// gcpMaterialIdentityChanged distinguishes an ordinary metadata update from
+// changing what an already-authorized Connection name means. Automatic
+// replacement of core.account/core.project is forbidden; other properties
+// (region, zone, output, and future non-routing metadata) may be updated while
+// preserving the existing Workspace grant.
+func gcpMaterialIdentityChanged(state gcpCandidateState) bool {
+	if state.ExpectAbsent {
+		return false
+	}
+	for _, key := range []string{gcpcreds.KeyAccount, gcpcreds.KeyProject} {
+		if strings.TrimSpace(state.Expected[key]) != strings.TrimSpace(state.Desired[key]) {
+			return true
+		}
+	}
+	return false
 }

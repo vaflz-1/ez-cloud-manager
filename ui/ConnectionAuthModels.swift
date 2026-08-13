@@ -38,6 +38,7 @@ struct ConnectionAuthCandidate: Codable, Hashable {
         case "update": return "Update"
         case "unchanged": return "No changes"
         case "conflict": return "Conflict"
+        case "blocked": return "Needs review"
         default: return status.capitalized
         }
     }

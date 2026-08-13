@@ -116,11 +116,50 @@ extension CredentialsService {
     /// for editing Profile.accounts/showAllAccounts directly. Returns the
     /// whole updated profile, same convention as `plugins enable/disable`.
     @discardableResult
-    func saveCloudAccountsSettings(profileID: String, _ settings: CloudAccountsSettings) throws -> Profile {
+    func saveCloudAccountsSettings(
+        profileID: String,
+        _ settings: CloudAccountsSettings,
+        expectedUpdatedAt: String
+    ) throws -> Profile {
         let payload = try JSONEncoder().encode(settings)
-        let saved: Profile = try decode(run(["profile", "settings", "set", "--id", profileID, "--plugin", PluginID.cloudAccounts], inputData: payload))
+        let saved: Profile = try decode(run([
+            "profile", "settings", "set", "--id", profileID,
+            "--plugin", PluginID.cloudAccounts,
+            "--expected-updated-at", expectedUpdatedAt
+        ], inputData: payload))
         storeProfile(saved)
         return saved
+    }
+
+    /// Atomic one-reference Workspace policy mutations. These patch the
+    /// latest on-disk allow-list under the core lock instead of replacing a
+    /// stale settings blob captured by an editor window.
+    func addConnectionToWorkspace(profileID: String, provider: String, account: String) throws -> Profile {
+        let saved: Profile = try decode(run([
+            "profile", "connections", "add", "--id", profileID,
+            "--provider", provider, "--account", account
+        ], input: nil))
+        storeProfile(saved)
+        return saved
+    }
+
+    func removeConnectionFromWorkspace(profileID: String, provider: String, account: String) throws -> Profile {
+        let saved: Profile = try decode(run([
+            "profile", "connections", "remove", "--id", profileID,
+            "--provider", provider, "--account", account
+        ], input: nil))
+        storeProfile(saved)
+        return saved
+    }
+
+    /// Fresh disk authorization used immediately before an operation whose
+    /// target could have been revoked while its editor remained open.
+    func isConnectionAllowed(profileID: String, provider: String, account: String) throws -> Bool {
+        let response: ConnectionAuthorization = try decode(run([
+            "profile", "connections", "authorize", "--id", profileID,
+            "--provider", provider, "--account", account
+        ], input: nil))
+        return response.allowed
     }
 
     /// Writes a `.ezprofile` zip to url. 0600: as sensitive as any other

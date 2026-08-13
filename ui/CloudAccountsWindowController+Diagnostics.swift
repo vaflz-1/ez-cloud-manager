@@ -61,9 +61,24 @@ extension CloudAccountsWindowController {
             return
         }
         let provider = selectedProvider
+        guard requireCurrentConnectionAuthorization(provider: provider, name: name) else { return }
         setConnectionTesting()
         service.runAsync({
-            try self.service.check(provider: provider, name, extraEnv: self.profile.envVars.asDictionary())
+            guard try self.service.isConnectionAllowed(
+                profileID: self.profile.id,
+                provider: provider,
+                account: name
+            ) else {
+                throw CredentialsService.ServiceError.toolFailed(
+                    "This Connection is no longer allowed in the current workspace."
+                )
+            }
+            return try self.service.check(
+                provider: provider,
+                name,
+                workspaceID: self.profile.id,
+                extraEnv: self.profile.envVars.asDictionary()
+            )
         }) { [weak self] result in
             guard let self, self.selectedProfileName == name, self.selectedProvider == provider else { return }
             switch result {

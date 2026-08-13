@@ -222,18 +222,41 @@ struct Profile: Codable {
 struct CloudAccountsSettings: Codable, Equatable {
     var showAllAccounts: Bool = false
     var accounts: [AccountRef] = []
+
+    /// One policy decision shared by every Workspace UI that exposes a
+    /// Connection. Physical provider stores are app-global; this allow-list
+    /// prevents a Workspace from discovering targets it does not own.
+    func allowsConnection(provider: String, account: String) -> Bool {
+        showAllAccounts || accounts.contains(AccountRef(provider: provider, account: account))
+    }
+
+    func filterConnections(_ connections: [ProfileSummary], provider: String) -> [ProfileSummary] {
+        connections.filter { allowsConnection(provider: provider, account: $0.name) }
+    }
+}
+
+struct ConnectionAuthorization: Codable {
+    let allowed: Bool
 }
 
 extension Profile {
-    /// Decodes this workspace's Connections visibility settings. A fresh
-    /// workspace has no blob yet and must show every discovered connection;
-    /// malformed optional UI state follows the same safe, usable default.
+    /// Decodes this Workspace's Connection policy. Missing or malformed
+    /// settings fail closed: an absent optional UI blob must never widen a
+    /// Workspace from an explicit allow-list to every identity on the host.
     var cloudAccountsSettings: CloudAccountsSettings {
         guard let raw = settings?[PluginID.cloudAccounts],
               let data = try? JSONEncoder().encode(raw),
               let decoded = try? JSONDecoder().decode(CloudAccountsSettings.self, from: data)
-        else { return CloudAccountsSettings(showAllAccounts: true, accounts: []) }
+        else { return CloudAccountsSettings() }
         return decoded
+    }
+
+    func allowsConnection(provider: String, account: String) -> Bool {
+        cloudAccountsSettings.allowsConnection(provider: provider, account: account)
+    }
+
+    func filterConnections(_ connections: [ProfileSummary], provider: String) -> [ProfileSummary] {
+        cloudAccountsSettings.filterConnections(connections, provider: provider)
     }
 }
 

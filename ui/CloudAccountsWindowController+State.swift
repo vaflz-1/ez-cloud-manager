@@ -189,15 +189,12 @@ extension CloudAccountsWindowController {
     /// edited in the Scope sheet (CloudAccountsWindowController+Scope.swift).
     func rebuildSidebarRows() {
         let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let scope = profile.cloudAccountsSettings
-        let scoped = !scope.showAllAccounts
+        let scoped = !profile.cloudAccountsSettings.showAllAccounts
         var rows: [SidebarRow] = []
         for info in catalog.providers {
             let all = profilesByProvider[info.id] ?? []
-            let visible = all.filter { summary in
-                if scoped, !scope.accounts.contains(AccountRef(provider: info.id, account: summary.name)) {
-                    return false
-                }
+            let allowed = profile.filterConnections(all, provider: info.id)
+            let visible = allowed.filter { summary in
                 return query.isEmpty || summary.name.localizedCaseInsensitiveContains(query)
             }
             // Hide empty provider groups while filtering/account-scoped so
@@ -208,6 +205,7 @@ extension CloudAccountsWindowController {
             rows.append(contentsOf: visible.map { .profile(provider: info.id, name: $0.name) })
         }
         sidebarRows = rows
+        updateDetailEmptyState()
 
         isRebuildingSidebar = true
         profilesTable.reloadData()
@@ -245,6 +243,45 @@ extension CloudAccountsWindowController {
         }
     }
 
+    /// A fail-closed Workspace can legitimately have no visible Connections.
+    /// That state needs an explicit recovery path; "Select a connection"
+    /// would otherwise point at an empty sidebar and make the toolbar-only
+    /// visibility control effectively undiscoverable.
+    func updateDetailEmptyState() {
+        guard detailEmptyStateTitleLabel != nil else { return }
+        let query = (profileSearchField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let physicalCount = profilesByProvider.values.reduce(0) { $0 + $1.count }
+        let hasVisibleConnections = sidebarRows.contains {
+            if case .profile = $0 { return true }
+            return false
+        }
+        if hasVisibleConnections {
+            detailEmptyStateTitleLabel.stringValue = "Select a connection"
+            detailEmptyStateSubtitleLabel.stringValue =
+                "Choose an existing connection in the sidebar, or create a new one."
+            detailEmptyScopeButton.isHidden = true
+            UI.style(detailEmptyCreateButton, as: .primary, large: true)
+        } else if !query.isEmpty {
+            detailEmptyStateTitleLabel.stringValue = "No matching Connections"
+            detailEmptyStateSubtitleLabel.stringValue =
+                "Clear or change the search to see this Workspace’s Connections."
+            detailEmptyScopeButton.isHidden = true
+            UI.style(detailEmptyCreateButton, as: .secondary, large: true)
+        } else if physicalCount > 0 && !profile.cloudAccountsSettings.showAllAccounts {
+            detailEmptyStateTitleLabel.stringValue = "No Connections are visible in this Workspace"
+            detailEmptyStateSubtitleLabel.stringValue =
+                "Choose existing Connections for this Workspace, or create a new one."
+            detailEmptyScopeButton.isHidden = false
+            UI.style(detailEmptyCreateButton, as: .secondary, large: true)
+        } else {
+            detailEmptyStateTitleLabel.stringValue = "No Connections yet"
+            detailEmptyStateSubtitleLabel.stringValue =
+                "Create the first Connection on this Mac, or sign in to a supported cloud CLI."
+            detailEmptyScopeButton.isHidden = true
+            UI.style(detailEmptyCreateButton, as: .primary, large: true)
+        }
+    }
+
     func profileExists(_ name: String, provider: String) -> Bool {
         (profilesByProvider[provider] ?? []).contains { $0.name == name }
     }
@@ -261,6 +298,7 @@ extension CloudAccountsWindowController {
     func loadProfile(provider: String, name: String) {
         showDetailEditor()
         beginEditorContextChange()
+        selectedConnectionAccessRevoked = false
         let generation = profileLoadGeneration
         let env = profile.envVars.asDictionary()
         selectedProvider = provider
@@ -277,10 +315,30 @@ extension CloudAccountsWindowController {
         saveButton.isEnabled = false
         profileModeLabel.stringValue = "Loading connection…"
         setStatus("Loading \(name)…")
-        service.runAsync({ try self.service.get(provider: provider, name, extraEnv: env) }) { [weak self] result in
+        service.runAsync({
+            let allowed = try self.service.isConnectionAllowed(
+                profileID: self.profile.id,
+                provider: provider,
+                account: name
+            )
+            guard allowed else { return (allowed: false, response: Optional<ProfileResponse>.none) }
+            let response = try self.service.get(
+                provider: provider,
+                name,
+                workspaceID: self.profile.id,
+                extraEnv: env
+            )
+            return (allowed: true, response: Optional(response))
+        }) { [weak self] result in
             guard let self, generation == self.profileLoadGeneration else { return }
             switch result {
-            case .success(let profileResponse):
+            case .success(let outcome):
+            guard outcome.allowed, let profileResponse = outcome.response else {
+                self.lockSelectedConnectionAfterRevocation()
+                self.rebuildSidebarRows()
+                self.showError("“\(name)” is no longer allowed in this Workspace. Its values were not loaded.")
+                return
+            }
             hiddenSelection = nil // an explicit selection supersedes the remembered one
             selectedProvider = provider
             selectedProfileName = profileResponse.name
@@ -311,6 +369,7 @@ extension CloudAccountsWindowController {
 
     func clearDetailForNoSelection() {
         beginEditorContextChange()
+        selectedConnectionAccessRevoked = false
         selectedProfileName = nil
         profileNameField.stringValue = ""
         pasteView.string = ""
@@ -491,12 +550,13 @@ extension CloudAccountsWindowController {
         let visible = (info?.canActivate ?? false)
             && selectedProfileName != nil
             && !selectedConnectionIsReadOnly()
+            && !selectedConnectionAccessRevoked
         button.isHidden = !visible
         button.toolTip = info?.activateLabel
     }
 
     func updateExportButton() {
-        exportButton?.isEnabled = selectedProfileName != nil
+        exportButton?.isEnabled = selectedProfileName != nil && !selectedConnectionAccessRevoked
     }
 
     /// Test Connection is always visible (never hidden per-provider — even
@@ -505,7 +565,7 @@ extension CloudAccountsWindowController {
     /// per docs/PLATFORM.md principle 6). It's only ENABLED once a saved
     /// account is selected.
     func updateTestConnectionButton() {
-        let enabled = selectedProfileName != nil
+        let enabled = selectedProfileName != nil && !selectedConnectionAccessRevoked
         testConnectionButton?.isEnabled = enabled
         testConnectionButton?.toolTip = enabled ? nil : "Select a saved connection to test its credentials"
     }
@@ -529,9 +589,20 @@ extension CloudAccountsWindowController {
     func updateProfileMode() {
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let readOnly = selectedConnectionIsReadOnly()
+        let accessRevoked = selectedConnectionAccessRevoked
         profileNameField.isEditable = !readOnly
-        pasteView.isEditable = !readOnly
-        fieldsTable.isEnabled = !readOnly
+        pasteView.isEditable = !readOnly && !accessRevoked
+        fieldsTable.isEnabled = !readOnly && !accessRevoked
+        profileNameField.isEditable = !readOnly && !accessRevoked
+        if accessRevoked {
+            profileModeLabel.stringValue = "Access removed from this Workspace"
+            saveButton.title = "Access Removed"
+            saveButton.isEnabled = false
+            updateActivateButton()
+            updateExportButton()
+            updateTestConnectionButton()
+            return
+        }
         if readOnly {
             profileModeLabel.stringValue = "Managed by the provider CLI"
             saveButton.title = "Managed Externally"

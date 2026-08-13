@@ -54,13 +54,13 @@ final class TransferWindowController: NSWindowController {
         content.addSubview(explainerLabel)
 
         exportButton = NSButton(title: "", target: self, action: #selector(exportTapped))
-        exportButton.bezelStyle = .rounded
+        UI.style(exportButton, as: .primary)
         exportButton.controlSize = .large
         exportButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(exportButton)
 
         let importButton = NSButton(title: "Import .ezprofile…", target: self, action: #selector(importTapped))
-        importButton.bezelStyle = .rounded
+        UI.style(importButton, as: .secondary)
         importButton.controlSize = .large
         importButton.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(importButton)
@@ -94,7 +94,7 @@ final class TransferWindowController: NSWindowController {
 
     private func renderProfile() {
         window?.title = Product.toolTitle("Transfer", workspace: profile.name)
-        explainerLabel?.stringValue = "Export “\(profile.name)” as a .ezprofile file for another machine, or import one as a new workspace."
+        explainerLabel?.stringValue = "Export “\(profile.name)” as a .ezprofile file for another machine, or import one as a new workspace. Imported Connections start hidden until you explicitly choose them on this Mac."
         exportButton?.title = "Export “\(profile.name)”…"
     }
 
@@ -123,7 +123,7 @@ final class TransferWindowController: NSWindowController {
             // Deliberately does NOT touch self.profile or this window's
             // title — import always creates a DIFFERENT profile (fresh id),
             // never overwrites the one this Transfer window is scoped to.
-            setStatus("Imported as “\(imported.name)” — use File ▸ New Window with Workspace to open it")
+            setStatus("Imported as “\(imported.name)” · Connections require review on this Mac")
         } catch {
             showError(error.localizedDescription)
         }

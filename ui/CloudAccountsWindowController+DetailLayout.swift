@@ -5,7 +5,7 @@ import AppKit
 /// polish landed. +Layout.swift keeps window/toolbar/sidebar construction.
 extension CloudAccountsWindowController {
     func buildDetail() -> NSView {
-        let view = NSView()
+        let view = FlippedConnectionsDocumentView()
         view.translatesAutoresizingMaskIntoConstraints = false
 
         // ── Card 1 · Connection name + connector + connectivity ─────────────
@@ -45,9 +45,7 @@ extension CloudAccountsWindowController {
         testConnectionButton = NSButton(title: "Test Connection", target: self, action: #selector(testConnection))
         testConnectionButton.image = NSImage(systemSymbolName: "checkmark.seal", accessibilityDescription: nil)
         testConnectionButton.imagePosition = .imageLeading
-        testConnectionButton.bezelStyle = .rounded
-        testConnectionButton.controlSize = .small
-        testConnectionButton.font = .systemFont(ofSize: 11)
+        UI.style(testConnectionButton, as: .secondary)
         testConnectionButton.isEnabled = false
         testConnectionButton.toolTip = "Select a saved connection to test its credentials"
 
@@ -201,6 +199,8 @@ extension CloudAccountsWindowController {
         // Export is a pull-down: formats target the clipboard (concealed),
         // "Save to File…" writes wherever the user picks.
         exportButton = NSPopUpButton()
+        exportButton.controlSize = .regular
+        exportButton.font = UI.bodyFont
         exportButton.pullsDown = true
         exportButton.addItem(withTitle: "Export")
         for (title, tag) in [("Copy as shell exports", 0), ("Copy as .env", 1), ("Copy as INI", 2), ("Copy as JSON", 3)] {
@@ -229,7 +229,10 @@ extension CloudAccountsWindowController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
-        activateButton = NSButton(title: "Set Active", target: self, action: #selector(activateProfile))
+        // Provider stores are machine-global even though this window belongs
+        // to one Workspace. The label must expose that blast radius before the
+        // confirmation sheet, not hide it behind a generic "Set Active".
+        activateButton = NSButton(title: "Make Active on This Mac", target: self, action: #selector(activateProfile))
         UI.style(activateButton, as: .secondary, large: true)
         activateButton.isHidden = true
         activateButton.translatesAutoresizingMaskIntoConstraints = false
@@ -250,21 +253,35 @@ extension CloudAccountsWindowController {
         footerButtons.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(footerButtons)
 
-        let emptyTitle = NSTextField(labelWithString: "Select a connection")
-        emptyTitle.font = UI.sectionTitleFont
-        let emptySubtitle = NSTextField(wrappingLabelWithString:
+        detailEmptyStateTitleLabel = NSTextField(labelWithString: "Select a connection")
+        detailEmptyStateTitleLabel.font = UI.sectionTitleFont
+        detailEmptyStateSubtitleLabel = NSTextField(wrappingLabelWithString:
             "Choose an existing connection in the sidebar, or create a new one.")
-        emptySubtitle.font = UI.bodyFont
-        emptySubtitle.textColor = .secondaryLabelColor
-        emptySubtitle.alignment = .center
-        emptySubtitle.maximumNumberOfLines = 2
-        let emptyCreate = NSButton(title: "New Connection", target: self, action: #selector(addProfile))
-        UI.style(emptyCreate, as: .primary, large: true)
-        let emptyStack = NSStackView(views: [emptyTitle, emptySubtitle, emptyCreate])
+        detailEmptyStateSubtitleLabel.font = UI.bodyFont
+        detailEmptyStateSubtitleLabel.textColor = .secondaryLabelColor
+        detailEmptyStateSubtitleLabel.alignment = .center
+        detailEmptyStateSubtitleLabel.maximumNumberOfLines = 2
+        detailEmptyScopeButton = NSButton(
+            title: "Choose Visible Connections…",
+            target: self,
+            action: #selector(openScopeSheet)
+        )
+        UI.style(detailEmptyScopeButton, as: .primary, large: true)
+        detailEmptyCreateButton = NSButton(title: "New Connection", target: self, action: #selector(addProfile))
+        UI.style(detailEmptyCreateButton, as: .secondary, large: true)
+        let emptyActions = NSStackView(views: [detailEmptyScopeButton, detailEmptyCreateButton])
+        emptyActions.orientation = .horizontal
+        emptyActions.alignment = .centerY
+        emptyActions.spacing = UI.space8
+        let emptyStack = NSStackView(views: [
+            detailEmptyStateTitleLabel,
+            detailEmptyStateSubtitleLabel,
+            emptyActions
+        ])
         emptyStack.orientation = .vertical
         emptyStack.alignment = .centerX
         emptyStack.spacing = UI.space8
-        emptyStack.setCustomSpacing(UI.space16, after: emptySubtitle)
+        emptyStack.setCustomSpacing(UI.space16, after: detailEmptyStateSubtitleLabel)
         emptyStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(emptyStack)
         detailEmptyStateView = emptyStack
@@ -353,4 +370,11 @@ extension CloudAccountsWindowController {
         ])
         return scroll
     }
+}
+
+/// AppKit document views are bottom-origin by default. A flipped document
+/// keeps the Connections form anchored to the top when its content becomes
+/// taller than the restored window and the outer scroll view starts moving.
+private final class FlippedConnectionsDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }
