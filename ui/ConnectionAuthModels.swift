@@ -66,9 +66,9 @@ enum ConnectionAuthApplyMode: String, Codable, CaseIterable {
 
     var title: String {
         switch self {
-        case .selected: return "Apply selected"
-        case .updateAll: return "Update imported"
-        case .addNew: return "Add new only"
+        case .selected: return "Selected connections"
+        case .updateAll: return "Select updates"
+        case .addNew: return "Select new"
         }
     }
 }

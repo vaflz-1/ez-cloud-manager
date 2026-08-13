@@ -259,6 +259,7 @@ extension CloudAccountsWindowController {
     }
 
     func loadProfile(provider: String, name: String) {
+        showDetailEditor()
         beginEditorContextChange()
         let generation = profileLoadGeneration
         let env = profile.envVars.asDictionary()
@@ -324,6 +325,15 @@ extension CloudAccountsWindowController {
         updateVariablesSummary()
         updateProfileMode()
         resetConnectionTestState()
+        detailEditorViews.forEach { $0.isHidden = true }
+        detailEmptyStateView?.isHidden = false
+        addRemoveControl?.setEnabled(false, forSegment: 1)
+    }
+
+    func showDetailEditor() {
+        detailEmptyStateView?.isHidden = true
+        detailEditorViews.forEach { $0.isHidden = false }
+        addRemoveControl?.setEnabled(selectedProfileName != nil, forSegment: 1)
     }
 
     /// Hides the paste-box hint the moment there's any text — see textDidChange below.

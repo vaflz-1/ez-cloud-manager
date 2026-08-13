@@ -62,6 +62,8 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
     var saveButton: NSButton!
     var activateButton: NSButton!
     var exportButton: NSPopUpButton!
+    var detailEditorViews: [NSView] = []
+    var detailEmptyStateView: NSView!
     var profileSearchField: NSSearchField!
     /// Lazily-created connector-owned browser login / synchronization sheet.
     /// Kept per Connections window so two Workspaces never share auth review

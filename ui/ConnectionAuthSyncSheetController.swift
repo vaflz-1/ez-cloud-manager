@@ -27,6 +27,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     private var dismissed = false
     private var closeAfterApply = false
     private var closeParentAfterApply = false
+    private var hasSizedForSnapshot = false
 
     private let providerPopup = NSPopUpButton()
     private let searchField = NSSearchField()
@@ -153,7 +154,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         providerPopup.setContentHuggingPriority(.required, for: .horizontal)
 
         tableView.headerView = nil
-        tableView.rowHeight = 58
+        tableView.rowHeight = 72
         tableView.backgroundColor = .clear
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.allowsEmptySelection = true
@@ -276,7 +277,19 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         discover()
     }
 
-    @objc private func modeChanged() { updateControls() }
+    @objc private func modeChanged() {
+        guard let candidates = snapshot?.candidates else { return }
+        selectedIDs = Set(candidates.filter { candidate in
+            guard candidate.canApply else { return false }
+            switch applyMode {
+            case .selected: return true
+            case .updateAll: return candidate.status == "update" || candidate.status == "unchanged"
+            case .addNew: return candidate.status == "new"
+            }
+        }.map(\.id))
+        tableView.reloadData()
+        updateControls()
+    }
 
     private var applyMode: ConnectionAuthApplyMode {
         guard let raw = modePopup.selectedItem?.representedObject as? String else { return .selected }
@@ -365,10 +378,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
             // modes are resolved here and sent as an explicit candidate set.
             // GCP destination status is core-owned and can apply the mode
             // atomically against its rediscovered configuration snapshot.
-            mode: currentProvider == "aws" ? .selected : applyMode,
-            candidateIDs: (applyMode == .selected || currentProvider == "aws")
-                ? selected.map(\.id).sorted()
-                : [],
+            mode: .selected,
+            candidateIDs: selected.map(\.id).sorted(),
             principal: principals.first
         )
         let provider = currentProvider
@@ -436,12 +447,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
 
     private func candidatesForCurrentMode(in snapshot: ConnectionAuthSnapshot) -> [ConnectionAuthCandidate] {
         snapshot.candidates.filter { candidate in
-            guard candidate.canApply else { return false }
-            switch applyMode {
-            case .selected: return selectedIDs.contains(candidate.id)
-            case .updateAll: return candidate.status == "update" || candidate.status == "unchanged"
-            case .addNew: return candidate.status == "new"
-            }
+            candidate.canApply && selectedIDs.contains(candidate.id)
         }
     }
 
@@ -511,11 +517,20 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         let applicable = Set(displaySnapshot.candidates.filter(\.canApply).map(\.id))
         selectedIDs = requestedIDs.map { $0.intersection(applicable) } ?? applicable
         rebuildFilter()
+        if !hasSizedForSnapshot {
+            let visibleRows = max(1, min(6, displaySnapshot.candidates.count))
+            scrollHeightConstraint?.constant = CGFloat(visibleRows * 72 + 2)
+            window?.setContentSize(NSSize(
+                width: 720,
+                height: 332 + (scrollHeightConstraint?.constant ?? 74)
+            ))
+            hasSizedForSnapshot = true
+        }
         let blocked = displaySnapshot.candidates.count - applicable.count
         let noun = displaySnapshot.provider == "aws" ? "AWS SSO profile" : "GCP project"
         let plural = displaySnapshot.candidates.count == 1 ? "" : "s"
         var summary = "Found \(displaySnapshot.candidates.count) \(noun)\(plural) · \(applicable.count) ready"
-        if blocked > 0 { summary += " · \(blocked) need review" }
+        if blocked > 0 { summary += " · \(blocked) blocked" }
         if let warning = displaySnapshot.warnings.first { summary += " · \(warning)" }
         setStatus(summary, announce: announce)
         updateControls()
@@ -529,8 +544,6 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
                 || candidate.targetDescription.localizedCaseInsensitiveContains(query)
                 || (candidate.roleName?.localizedCaseInsensitiveContains(query) ?? false)
         }
-        let visibleRows = max(3, min(7, filteredCandidates.count))
-        scrollHeightConstraint?.constant = CGFloat(visibleRows * 58 + 2)
         tableView.reloadData()
         updateControls()
     }
@@ -581,9 +594,12 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         searchField.isEnabled = snapshot != nil && !busy && !applying
         tableView.isEnabled = !busy && !applying
         modePopup.isEnabled = snapshot != nil && !busy && !applying
-        signInButton.isEnabled = (currentProvider == "gcp" || snapshot != nil) && !busy && !applying
+        let canSignIn = currentProvider == "gcp" || (snapshot != nil && !selectedIDs.isEmpty)
+        signInButton.isEnabled = canSignIn && !busy && !applying
         let hasApplicable = snapshot.map { !candidatesForCurrentMode(in: $0).isEmpty } ?? false
         applyButton.isEnabled = hasApplicable && !busy && !applying
+        let count = snapshot.map { candidatesForCurrentMode(in: $0).count } ?? 0
+        applyButton.title = count == 0 ? "Sync" : "Sync \(count)"
         cancelButton.isEnabled = !applying
         cancelButton.title = busy ? "Cancel Sign-In" : "Cancel"
     }
@@ -630,7 +646,8 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
         checkbox.translatesAutoresizingMaskIntoConstraints = false
         subtitle.textColor = .secondaryLabelColor
         subtitle.font = .systemFont(ofSize: 11)
-        subtitle.lineBreakMode = .byTruncatingMiddle
+        subtitle.maximumNumberOfLines = 2
+        subtitle.lineBreakMode = .byWordWrapping
         subtitle.translatesAutoresizingMaskIntoConstraints = false
         status.font = .systemFont(ofSize: 11, weight: .medium)
         status.alignment = .right
@@ -644,6 +661,7 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
             checkbox.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -8),
             subtitle.leadingAnchor.constraint(equalTo: checkbox.leadingAnchor, constant: 20),
             subtitle.topAnchor.constraint(equalTo: checkbox.bottomAnchor, constant: 3),
+            subtitle.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -7),
             subtitle.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -8),
             status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             status.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -663,7 +681,7 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
             .joined(separator: " · ")
         subtitle.stringValue = candidate.reason ?? details
         status.stringValue = candidate.status == "conflict" ? "Name conflict" : candidate.statusTitle
-        status.textColor = candidate.status == "conflict" ? .systemRed : .secondaryLabelColor
+        status.textColor = candidate.status == "conflict" ? .systemOrange : .secondaryLabelColor
         checkbox.toolTip = candidate.canApply ? nil : candidate.reason
         subtitle.toolTip = candidate.reason ?? details
         setAccessibilityLabel("\(candidate.displayName), \(details), \(candidate.statusTitle)")

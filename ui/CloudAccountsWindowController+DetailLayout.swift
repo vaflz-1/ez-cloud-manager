@@ -230,14 +230,12 @@ extension CloudAccountsWindowController {
         view.addSubview(statusLabel)
 
         activateButton = NSButton(title: "Set Active", target: self, action: #selector(activateProfile))
-        activateButton.bezelStyle = .rounded
-        activateButton.controlSize = .large
+        UI.style(activateButton, as: .secondary, large: true)
         activateButton.isHidden = true
         activateButton.translatesAutoresizingMaskIntoConstraints = false
 
         saveButton = NSButton(title: "Save Connection", target: self, action: #selector(saveProfile))
-        saveButton.bezelStyle = .push
-        saveButton.controlSize = .large
+        UI.style(saveButton, as: .primary, large: true)
         saveButton.keyEquivalent = "\r"
         saveButton.translatesAutoresizingMaskIntoConstraints = false
 
@@ -251,6 +249,26 @@ extension CloudAccountsWindowController {
         footerButtons.spacing = 10
         footerButtons.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(footerButtons)
+
+        let emptyTitle = NSTextField(labelWithString: "Select a connection")
+        emptyTitle.font = UI.sectionTitleFont
+        let emptySubtitle = NSTextField(wrappingLabelWithString:
+            "Choose an existing connection in the sidebar, or create a new one.")
+        emptySubtitle.font = UI.bodyFont
+        emptySubtitle.textColor = .secondaryLabelColor
+        emptySubtitle.alignment = .center
+        emptySubtitle.maximumNumberOfLines = 2
+        let emptyCreate = NSButton(title: "New Connection", target: self, action: #selector(addProfile))
+        UI.style(emptyCreate, as: .primary, large: true)
+        let emptyStack = NSStackView(views: [emptyTitle, emptySubtitle, emptyCreate])
+        emptyStack.orientation = .vertical
+        emptyStack.alignment = .centerX
+        emptyStack.spacing = UI.space8
+        emptyStack.setCustomSpacing(UI.space16, after: emptySubtitle)
+        emptyStack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(emptyStack)
+        detailEmptyStateView = emptyStack
+        detailEditorViews = [profileCard, pasteCard, varsCard, statusLabel, footerButtons]
 
         NSLayoutConstraint.activate([
             // Card 1 — Profile
@@ -312,10 +330,27 @@ extension CloudAccountsWindowController {
             saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 130),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: UI.pad),
             statusLabel.centerYAnchor.constraint(equalTo: footerButtons.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: footerButtons.leadingAnchor, constant: -12)
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: footerButtons.leadingAnchor, constant: -12),
+            emptyStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            emptyStack.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -20),
+            emptyStack.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
         ])
 
         clearDetailForNoSelection()
-        return view
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = view
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            view.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            view.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            view.heightAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.heightAnchor)
+        ])
+        return scroll
     }
 }

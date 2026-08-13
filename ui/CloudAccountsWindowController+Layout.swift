@@ -102,16 +102,18 @@ extension CloudAccountsWindowController {
         if !win.setFrameUsingName(autosaveName) {
             win.center()
         }
-        guard !frameIsOnScreen(win.frame) else { return }
-
-        win.center()
-        if !frameIsOnScreen(win.frame), let visible = NSScreen.main?.visibleFrame {
-            let size = win.frame.size
-            win.setFrameOrigin(NSPoint(
-                x: visible.midX - size.width / 2,
-                y: visible.midY - size.height / 2
-            ))
-        }
+        let screen = NSScreen.screens.max { lhs, rhs in
+            let left = lhs.visibleFrame.intersection(win.frame)
+            let right = rhs.visibleFrame.intersection(win.frame)
+            return left.width * left.height < right.width * right.height
+        } ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return }
+        var frame = win.frame
+        frame.size.width = min(frame.width, visible.width)
+        frame.size.height = min(frame.height, visible.height)
+        frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+        frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        win.setFrame(frame, display: false)
     }
 
     /// True if `frame` overlaps some screen's visible area enough to be usable.
@@ -193,7 +195,7 @@ extension CloudAccountsWindowController {
 
     func roundedButton(title: String, systemImage: String? = nil, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
-        button.bezelStyle = .rounded
+        UI.style(button, as: .secondary)
         if let systemImage, let image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title) {
             button.image = image
             button.imagePosition = title.count <= 1 ? .imageOnly : .imageLeading

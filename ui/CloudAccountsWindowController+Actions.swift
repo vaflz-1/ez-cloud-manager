@@ -12,6 +12,7 @@ extension CloudAccountsWindowController {
 
     @objc func addProfile() {
         guard confirmDiscardConnectionChanges() else { return }
+        showDetailEditor()
         beginEditorContextChange()
         // Keep the provider of whatever group the user was looking at.
         selectedProfileName = nil
