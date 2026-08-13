@@ -72,7 +72,9 @@ exit 4
 	}
 
 	startedPath := filepath.Join(stateDir, "vendor.started")
-	deadline := time.Now().Add(5 * time.Second)
+	// A full race run compiles and executes every package in parallel on the
+	// same host; leave startup headroom without changing production timeouts.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if _, err := os.Stat(startedPath); err == nil {
 			break
