@@ -54,6 +54,11 @@ enum AppAppearance: Int, CaseIterable {
 /// mode and Increased Contrast remain platform-correct; the brand mark owns
 /// the petrol/porcelain palette instead of tinting every control.
 enum UI {
+    enum ButtonRole {
+        case primary
+        case secondary
+    }
+
     static let space4: CGFloat = 4
     static let space8: CGFloat = 8
     static let space12: CGFloat = 12
@@ -74,6 +79,18 @@ enum UI {
     static let bodyFont = NSFont.systemFont(ofSize: 13)
     static let captionFont = NSFont.systemFont(ofSize: 11)
     static let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    /// One native button contract for every product surface. Roles express
+    /// hierarchy; they must not change geometry for adjacent controls.
+    static func style(_ button: NSButton, as role: ButtonRole, large: Bool = false) {
+        button.bezelStyle = .rounded
+        button.controlSize = large ? .large : .regular
+        button.font = .systemFont(
+            ofSize: large ? 15 : 13,
+            weight: role == .primary ? .medium : .regular
+        )
+        button.keyEquivalentModifierMask = []
+    }
 
     static func makeCard() -> NSBox {
         let box = NSBox()

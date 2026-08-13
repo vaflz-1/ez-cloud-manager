@@ -153,7 +153,9 @@ extension CloudAccountsWindowController {
         fieldsTable.style = .inset
         fieldsTable.rowHeight = UI.rowHeight
         fieldsTable.intercellSpacing = NSSize(width: 0, height: 0)
-        fieldsTable.selectionHighlightStyle = .regular
+        // This is an editable form, not a selectable result list. The native
+        // blue row highlight competes with field focus and obscures secrets.
+        fieldsTable.selectionHighlightStyle = .none
         fieldsTable.floatsGroupRows = false
         fieldsTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         fieldsTable.allowsColumnResizing = false

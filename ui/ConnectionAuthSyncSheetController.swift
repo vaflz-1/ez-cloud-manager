@@ -42,6 +42,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     private let signInButton = NSButton(title: "Sign In…", target: nil, action: nil)
     private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private var scrollHeightConstraint: NSLayoutConstraint?
 
     init(
         providerID: String,
@@ -110,7 +111,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
 
     private func buildWindow(initialProviderID: String) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 590),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 510),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
@@ -187,18 +188,18 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         statusLabel.maximumNumberOfLines = 2
         statusLabel.setAccessibilityElement(true)
 
-        signInButton.bezelStyle = .rounded
+        UI.style(signInButton, as: .secondary)
         signInButton.target = self
         signInButton.action = #selector(signIn)
         signInButton.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: nil)
         signInButton.imagePosition = .imageLeading
 
-        applyButton.bezelStyle = .rounded
+        UI.style(applyButton, as: .primary)
         applyButton.keyEquivalent = "\r"
         applyButton.target = self
         applyButton.action = #selector(apply)
 
-        cancelButton.bezelStyle = .rounded
+        UI.style(cancelButton, as: .secondary)
         cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.target = self
         cancelButton.action = #selector(cancelOrClose)
@@ -225,7 +226,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         topControls.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 330).isActive = true
+        scrollHeightConstraint = scroll.heightAnchor.constraint(equalToConstant: 250)
+        scrollHeightConstraint?.isActive = true
         statusRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         statusLabel.trailingAnchor.constraint(equalTo: statusRow.trailingAnchor).isActive = true
         actions.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -254,6 +256,13 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
     @objc private func candidateToggled(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < filteredCandidates.count else { return }
         let candidate = filteredCandidates[sender.tag]
+        // A direct checkbox gesture always means "Apply selected". Keeping a
+        // bulk mode active made a checked row look selected while Apply used
+        // a different set — exactly the kind of broken agency this review UI
+        // must avoid.
+        if applyMode != .selected {
+            modePopup.selectItem(withTitle: ConnectionAuthApplyMode.selected.title)
+        }
         if sender.state == .on { selectedIDs.insert(candidate.id) } else { selectedIDs.remove(candidate.id) }
         updateControls()
     }
@@ -474,12 +483,41 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         } else {
             normalized = snapshot
         }
-        self.snapshot = normalized
-        let applicable = Set(normalized.candidates.filter(\.canApply).map(\.id))
+        let displaySnapshot = ConnectionAuthSnapshot(
+            protocolVersion: normalized.protocolVersion,
+            provider: normalized.provider,
+            revision: normalized.revision,
+            candidates: normalized.candidates.map { candidate in
+                guard !candidate.canApply else { return candidate }
+                return ConnectionAuthCandidate(
+                    id: candidate.id,
+                    name: candidate.name,
+                    displayName: candidate.displayName,
+                    sourceProfile: candidate.sourceProfile,
+                    authMode: candidate.authMode,
+                    principal: candidate.principal,
+                    accountID: candidate.accountID,
+                    roleName: candidate.roleName,
+                    projectID: candidate.projectID,
+                    region: candidate.region,
+                    status: "conflict",
+                    canApply: false,
+                    reason: candidate.reason
+                )
+            },
+            warnings: normalized.warnings
+        )
+        self.snapshot = displaySnapshot
+        let applicable = Set(displaySnapshot.candidates.filter(\.canApply).map(\.id))
         selectedIDs = requestedIDs.map { $0.intersection(applicable) } ?? applicable
         rebuildFilter()
-        let warning = normalized.warnings.first.map { " \($0)" } ?? ""
-        setStatus("Found \(normalized.candidates.count) connection candidate(s).\(warning)", announce: announce)
+        let blocked = displaySnapshot.candidates.count - applicable.count
+        let noun = displaySnapshot.provider == "aws" ? "AWS SSO profile" : "GCP project"
+        let plural = displaySnapshot.candidates.count == 1 ? "" : "s"
+        var summary = "Found \(displaySnapshot.candidates.count) \(noun)\(plural) · \(applicable.count) ready"
+        if blocked > 0 { summary += " · \(blocked) need review" }
+        if let warning = displaySnapshot.warnings.first { summary += " · \(warning)" }
+        setStatus(summary, announce: announce)
         updateControls()
     }
 
@@ -491,6 +529,8 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
                 || candidate.targetDescription.localizedCaseInsensitiveContains(query)
                 || (candidate.roleName?.localizedCaseInsensitiveContains(query) ?? false)
         }
+        let visibleRows = max(3, min(7, filteredCandidates.count))
+        scrollHeightConstraint?.constant = CGFloat(visibleRows * 58 + 2)
         tableView.reloadData()
         updateControls()
     }
@@ -539,7 +579,7 @@ final class ConnectionAuthSyncSheetController: NSWindowController,
         let busy = cancellation != nil
         providerPopup.isEnabled = !busy && !applying
         searchField.isEnabled = snapshot != nil && !busy && !applying
-        tableView.isEnabled = !busy && !applying && applyMode == .selected
+        tableView.isEnabled = !busy && !applying
         modePopup.isEnabled = snapshot != nil && !busy && !applying
         signInButton.isEnabled = (currentProvider == "gcp" || snapshot != nil) && !busy && !applying
         let hasApplicable = snapshot.map { !candidatesForCurrentMode(in: $0).isEmpty } ?? false
@@ -617,13 +657,15 @@ private final class ConnectionAuthCandidateCell: NSTableCellView {
         checkbox.tag = row
         checkbox.title = candidate.displayName
         checkbox.state = checked ? .on : .off
-        checkbox.isEnabled = candidate.canApply
+        checkbox.isEnabled = candidate.canApply && candidate.status != "conflict"
         let details = [candidate.targetDescription, candidate.roleName, candidate.principal]
             .compactMap { value in value.flatMap { $0.isEmpty ? nil : $0 } }
             .joined(separator: " · ")
         subtitle.stringValue = candidate.reason ?? details
-        status.stringValue = candidate.statusTitle
+        status.stringValue = candidate.status == "conflict" ? "Name conflict" : candidate.statusTitle
         status.textColor = candidate.status == "conflict" ? .systemRed : .secondaryLabelColor
+        checkbox.toolTip = candidate.canApply ? nil : candidate.reason
+        subtitle.toolTip = candidate.reason ?? details
         setAccessibilityLabel("\(candidate.displayName), \(details), \(candidate.statusTitle)")
     }
 }

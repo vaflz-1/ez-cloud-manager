@@ -120,7 +120,7 @@ func (m *Manager) discoverAWS() (DiscoverySnapshot, map[string]awsSource, error)
 		case strings.HasPrefix(name, "-"):
 			candidate.Reason = "AWS profile names beginning with a dash cannot be used safely by the CLI."
 		case credentialCollisions[name]:
-			candidate.Reason = "A credentials-file profile with the same name would take precedence."
+			candidate.Reason = "Rename or remove the matching credentials-file connection first; AWS would otherwise use it instead of SSO."
 		case hasAWSCredentialResolutionFields(fields):
 			candidate.Reason = "The AWS config profile also defines a static or delegated credential source."
 		case sessionName != "" && (!safeIdentifier(sessionName, 256) || strings.HasPrefix(sessionName, "-")):

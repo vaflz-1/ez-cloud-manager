@@ -112,7 +112,7 @@ extension ProfileWindowController {
         workspaceMetaLabel = meta
 
         let browse = NSButton(title: "Browse Add-ons…", target: self, action: #selector(openCatalog))
-        browse.bezelStyle = .rounded
+        UI.style(browse, as: .secondary)
         browse.translatesAutoresizingMaskIntoConstraints = false
         browseAddonsButton = browse
 
@@ -185,14 +185,13 @@ extension ProfileWindowController {
         subtitle.maximumNumberOfLines = 3
 
         let button = NSButton(title: "Browse Add-ons…", target: self, action: #selector(openCatalog))
-        button.bezelStyle = .rounded
-        button.controlSize = .large
+        UI.style(button, as: .primary, large: true)
         emptyStateTitleLabel = title
         emptyStateSubtitleLabel = subtitle
         emptyStateButton = button
 
         let connections = NSButton(title: "Connections", target: self, action: #selector(openConnections))
-        connections.bezelStyle = .rounded
+        UI.style(connections, as: .secondary, large: true)
 
         let actions = NSStackView(views: [button, connections])
         actions.orientation = .horizontal

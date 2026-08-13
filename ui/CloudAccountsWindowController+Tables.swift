@@ -51,9 +51,9 @@ extension CloudAccountsWindowController {
             case .header: return false
             }
         }
-        guard row >= 0, row < displayItems.count else { return true }
+        guard row >= 0, row < displayItems.count else { return false }
         if case .header = displayItems[row] { return false }
-        return true
+        return false
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
