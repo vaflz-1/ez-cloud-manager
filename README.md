@@ -100,9 +100,15 @@ ezcloud connections auth discover --provider aws
 ## Build / install
 
 ```bash
-./build.sh    # builds, signs and installs /Applications/Kervik.app
-go test ./...
+./tools/verify-local.sh       # tests, race, vet, Swift, icon, secrets, IPC
+./build.sh                    # builds, signs and installs /Applications/Kervik.app
+./tools/install-local-hooks.sh # optional: run verification before every push
 ```
+
+Builds and verification are intentionally local-only. The repository has no
+hosted CI workflows, runner-dependent release jobs or Jenkins service. The
+optional pre-push hook is installed only into the local `.git/hooks` directory
+and is never committed or transmitted.
 
 ## Security model
 

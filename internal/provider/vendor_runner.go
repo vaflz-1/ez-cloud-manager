@@ -163,12 +163,13 @@ func resolveVendorExecutable(executable string, env []string) (string, error) {
 		if err != nil || info.IsDir() {
 			continue
 		}
-		if !trustedVendorPathOwner(info) || info.Mode().Perm()&0o022 != 0 ||
-			(info.Mode()&os.ModeSymlink == 0 && info.Mode()&0o111 == 0) {
+		isSymlink := info.Mode()&os.ModeSymlink != 0
+		if !trustedVendorPathOwner(info) ||
+			(!isSymlink && (info.Mode().Perm()&0o022 != 0 || info.Mode()&0o111 == 0)) {
 			unsafeFound = true
 			continue
 		}
-		if protectedSymlinkRequired && info.Mode()&os.ModeSymlink == 0 {
+		if protectedSymlinkRequired && !isSymlink {
 			unsafeFound = true
 			continue
 		}
