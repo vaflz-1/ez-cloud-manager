@@ -167,21 +167,13 @@ func TestSetSettingsBlobUnknownProfileFails(t *testing.T) {
 }
 
 func TestGetCloudAccountsSettingsZeroValueOnMalformedBlob(t *testing.T) {
-	root := tmpRoot(t)
-	created := mustCreate(t, root, Profile{Name: "a"})
-	// Bypass validation (which would reject this) to simulate a foreign or
-	// hand-edited blob under the cloud-accounts key that doesn't parse as
-	// CloudAccountsSettings — GetCloudAccountsSettings must degrade to the
-	// zero value, never error or panic, for a caller that just wants to know
-	// the current scope.
-	created.Settings = map[string]json.RawMessage{plugin.CloudAccountsID: json.RawMessage(`{"accounts":"not-an-array"}`)}
-	writeRawProfile(t, root, created)
-
-	got, err := Get(root, created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := GetCloudAccountsSettings(got)
+	// Persisted profiles now re-run validateProfile on every read and therefore
+	// reject this tampering. Keep the helper's defensive contract pinned with an
+	// in-memory foreign Profile: callers still get a zero value, never a panic.
+	foreign := Profile{Settings: map[string]json.RawMessage{
+		plugin.CloudAccountsID: json.RawMessage(`{"accounts":"not-an-array"}`),
+	}}
+	s := GetCloudAccountsSettings(foreign)
 	if s.ShowAllAccounts || len(s.Accounts) != 0 {
 		t.Fatalf("expected the zero value for a malformed blob, got %+v", s)
 	}

@@ -73,6 +73,37 @@ struct FastProcessRunnerSmoke {
         require(signaled.terminationSignal == SIGTERM, "signal reported")
         require(signaled.terminationStatus == 128 + SIGTERM, "signal status")
 
+        let cancellation = FastProcessCancellation()
+        let cancellationGroup = DispatchGroup()
+        let cancellationLock = NSLock()
+        var cancelledResult: FastProcessResult?
+        var cancellationError: Error?
+        cancellationGroup.enter()
+        let cancellationStart = CFAbsoluteTimeGetCurrent()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { cancellationGroup.leave() }
+            do {
+                let result = try FastProcessRunner.run(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "sleep 30"],
+                    input: nil,
+                    environment: ProcessInfo.processInfo.environment,
+                    cancellation: cancellation
+                )
+                cancellationLock.lock(); cancelledResult = result; cancellationLock.unlock()
+            } catch {
+                cancellationLock.lock(); cancellationError = error; cancellationLock.unlock()
+            }
+        }
+        usleep(100_000)
+        cancellation.cancel()
+        cancellationGroup.wait()
+        let cancellationDuration = CFAbsoluteTimeGetCurrent() - cancellationStart
+        require(cancellationError == nil, "cancellation wait error")
+        require(cancelledResult?.terminationSignal == SIGTERM || cancelledResult?.terminationSignal == SIGKILL,
+                "cancelled process signal")
+        require(cancellationDuration < 3.5, "process-tree cancellation latency")
+
         do {
             _ = try run("/definitely/missing/fast-process", [])
             require(false, "missing executable")

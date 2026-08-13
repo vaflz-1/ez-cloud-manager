@@ -8,6 +8,8 @@
 package azureprovider
 
 import (
+	"errors"
+
 	"ez-cloud-manager/internal/azurecreds"
 	"ez-cloud-manager/internal/provider"
 )
@@ -15,6 +17,8 @@ import (
 const id = "azure"
 
 type azureProvider struct{}
+
+var _ provider.ConditionalSaver = azureProvider{}
 
 // New returns the Azure profiles provider, backed by an app-owned 0600 INI
 // file (the Azure CLI has no native named-profile store to reuse).
@@ -47,6 +51,14 @@ func (azureProvider) Get(path, name string) (provider.Profile, error) {
 
 func (azureProvider) Save(path, name string, fields map[string]string) error {
 	return azurecreds.Save(path, name, fields)
+}
+
+func (azureProvider) SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	err := azurecreds.SaveIfUnchanged(path, name, fields, expectedFields, expectAbsent)
+	if errors.Is(err, azurecreds.ErrConflict) {
+		return provider.ErrConnectionConflict
+	}
+	return err
 }
 
 func (azureProvider) Delete(path, name string) error {

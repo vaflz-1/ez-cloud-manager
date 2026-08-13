@@ -133,8 +133,12 @@ func isNewerProfile(candidate, current profile.Profile) (bool, error) {
 }
 
 func connectionsCommand(args []string) {
+	if len(args) > 0 && args[0] == "auth" {
+		connectionsAuthCommand(args[1:])
+		return
+	}
 	if len(args) != 1 || args[0] != "list" {
-		fail(fmt.Errorf("usage: ezcloud connections list"))
+		fail(fmt.Errorf("usage: ezcloud connections list | auth discover|login|apply --provider aws|gcp"))
 	}
 
 	infos, err := registeredProviderInfos()

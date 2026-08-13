@@ -185,7 +185,13 @@ extension CloudAccountsWindowController {
         let env = profile.envVars.asDictionary()
         service.runAsync({
             if isCreateNew {
-                try self.service.save(provider: "gcp", chosen, fields: [:], extraEnv: env)
+                try self.service.save(
+                    provider: "gcp",
+                    chosen,
+                    fields: [:],
+                    expectAbsent: true,
+                    extraEnv: env
+                )
             }
             try self.service.activate(provider: "gcp", chosen, extraEnv: env)
             try self.service.delete(provider: "gcp", targetName, extraEnv: env)

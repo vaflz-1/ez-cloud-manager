@@ -12,7 +12,10 @@ import (
 
 func TestConcurrentSavesSerializeWithoutLostProperties(t *testing.T) {
 	root := t.TempDir()
-	path := configFile(root, "shared")
+	path, err := configFile(root, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
 	release, err := pathlock.Acquire(path)
 	if err != nil {
 		t.Fatalf("hold configuration lock: %v", err)
@@ -59,6 +62,90 @@ func TestConcurrentSavesSerializeWithoutLostProperties(t *testing.T) {
 	}
 }
 
+func TestConditionalSaveAllowsExactlyOneConcurrentUpdate(t *testing.T) {
+	root := t.TempDir()
+	baseline := map[string]string{KeyProject: "project-original"}
+	if err := Save(root, "shared", baseline); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	for _, project := range []string{"project-a", "project-b"} {
+		project := project
+		go func() {
+			<-start
+			done <- SaveIfUnchanged(root, "shared", map[string]string{KeyProject: project}, baseline, false)
+		}()
+	}
+	close(start)
+
+	successes, conflicts := 0, 0
+	for range 2 {
+		switch err := <-done; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("conditional save returned unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want exactly one of each", successes, conflicts)
+	}
+	if err := SaveIfUnchanged(root, "new", baseline, nil, true); err != nil {
+		t.Fatalf("create with absent precondition: %v", err)
+	}
+	if err := SaveIfUnchanged(root, "new", baseline, nil, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second absent-precondition create error = %v, want ErrConflict", err)
+	}
+}
+
+func TestConditionalBatchConflictWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	firstBaseline := map[string]string{KeyProject: "first-original"}
+	secondBaseline := map[string]string{KeyProject: "second-original"}
+	if err := Save(root, "first", firstBaseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, "second", secondBaseline); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an independent edit after batch discovery. The first row still
+	// matches, but the stale second row must abort before first is written.
+	if err := Save(root, "second", map[string]string{KeyProject: "second-external"}); err != nil {
+		t.Fatal(err)
+	}
+	err := SaveBatchIfUnchanged(root, []ConditionalSave{
+		{
+			Name: "first", Fields: map[string]string{KeyProject: "first-batch"},
+			ExpectedFields: firstBaseline,
+		},
+		{
+			Name: "second", Fields: map[string]string{KeyProject: "second-batch"},
+			ExpectedFields: secondBaseline,
+		},
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("batch error = %v, want ErrConflict", err)
+	}
+	first, err := Get(root, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Get(root, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Fields[KeyProject] != "first-original" {
+		t.Fatalf("first row was partially committed: %+v", first.Fields)
+	}
+	if second.Fields[KeyProject] != "second-external" {
+		t.Fatalf("independent second-row edit changed: %+v", second.Fields)
+	}
+}
+
 func TestActivateAndDeleteShareTheActiveStateLock(t *testing.T) {
 	root := t.TempDir()
 	if err := Save(root, "one", map[string]string{KeyProject: "p1"}); err != nil {
@@ -84,7 +171,10 @@ func TestActivateAndDeleteShareTheActiveStateLock(t *testing.T) {
 		runWhileGCPPathLocked(t, activeConfigFile(root), func() error {
 			return Delete(root, "one")
 		})
-		configPath := configFile(root, "one")
+		configPath, err := configFile(root, "one")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("deleted configuration still exists: %v", err)
 		}

@@ -1,10 +1,13 @@
 package gcpcreds
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ez-cloud-manager/internal/inifile"
 )
 
 func TestSaveGetListRoundtrip(t *testing.T) {
@@ -70,6 +73,64 @@ func TestSaveRejectsBadNames(t *testing.T) {
 		if err := Save(root, bad, map[string]string{KeyProject: "p"}); err == nil {
 			t.Errorf("expected error for name %q", bad)
 		}
+	}
+}
+
+func TestGetAndDeleteRejectPathTraversal(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "sentinel")
+	const original = "[core]\nproject = must-survive\n"
+	if err := os.WriteFile(sentinel, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before name validation, config_ + this value cleaned to root/sentinel.
+	attack := "x/../../sentinel"
+	if _, err := Get(root, attack); err == nil {
+		t.Fatal("Get accepted a traversal configuration name")
+	}
+	if err := Delete(root, attack); err == nil {
+		t.Fatal("Delete accepted a traversal configuration name")
+	}
+	data, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel was removed: %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("sentinel changed: %q", data)
+	}
+}
+
+func TestSaveRejectsUnsafeSectionAndPropertyNames(t *testing.T) {
+	root := t.TempDir()
+	if err := Save(root, "safe", map[string]string{KeyProject: "original"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "configurations", "config_safe")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{
+		"core]\n[injected.value",
+		"bad section.value",
+		"core.bad\nvalue",
+		".value",
+		"core.",
+	} {
+		t.Run(strings.ReplaceAll(key, "\n", "\\n"), func(t *testing.T) {
+			if err := Save(root, "safe", map[string]string{key: "payload"}); err == nil {
+				t.Fatalf("Save accepted unsafe property key %q", key)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(original) {
+				t.Fatalf("rejected save changed configuration for key %q", key)
+			}
+		})
 	}
 }
 
@@ -252,5 +313,86 @@ func TestSavePreservesUnknownPropertiesAndComments(t *testing.T) {
 	}
 	if !strings.Contains(content, "new@example.com") {
 		t.Error("edit was not applied")
+	}
+}
+
+func TestConditionalBatchRollsBackEarlierWriteWhenLaterWriteFails(t *testing.T) {
+	root := t.TempDir()
+	one := map[string]string{KeyAccount: "old-one@example.com", KeyProject: "project-one"}
+	two := map[string]string{KeyAccount: "old-two@example.com", KeyProject: "project-two"}
+	if err := Save(root, "project-one", one); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, "project-two", two); err != nil {
+		t.Fatal(err)
+	}
+
+	originalWriter := writeBatchAtomic
+	calls := 0
+	writeBatchAtomic = func(path string, model inifile.Model, backup bool) error {
+		calls++
+		if calls == 2 {
+			return errors.New("injected second-row write failure")
+		}
+		return inifile.WriteAtomic(path, model, backup)
+	}
+	t.Cleanup(func() { writeBatchAtomic = originalWriter })
+
+	err := SaveBatchIfUnchanged(root, []ConditionalSave{
+		{Name: "project-one", Fields: map[string]string{KeyAccount: "new@example.com", KeyProject: "project-one"}, ExpectedFields: one},
+		{Name: "project-two", Fields: map[string]string{KeyAccount: "new@example.com", KeyProject: "project-two"}, ExpectedFields: two},
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected second-row") {
+		t.Fatalf("expected injected failure, got %v", err)
+	}
+	for name, want := range map[string]map[string]string{"project-one": one, "project-two": two} {
+		got, getErr := Get(root, name)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		for key, value := range want {
+			if got.Fields[key] != value {
+				t.Fatalf("%s was left partially changed: %+v", name, got.Fields)
+			}
+		}
+	}
+}
+
+func TestGetAndConditionalSaveRejectDuplicateIdentitySections(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "configurations", "config_ambiguous")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := "[core]\naccount = first@example.com\nproject = project-one\n\n[core]\naccount = second@example.com\nproject = project-two\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Get(root, "ambiguous"); err == nil || !strings.Contains(err.Error(), "duplicate section") {
+		t.Fatalf("ambiguous identity was accepted: %v", err)
+	}
+	if err := SaveIfUnchanged(root, "ambiguous", map[string]string{KeyAccount: "new@example.com"}, map[string]string{}, false); err == nil {
+		t.Fatal("conditional save accepted duplicate identity sections")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != original {
+		t.Fatalf("rejected ambiguous config changed on disk: %q", after)
+	}
+}
+
+func TestGetRejectsDuplicateIdentityProperty(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "configurations", "config_ambiguous")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[core]\naccount = first@example.com\naccount = second@example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Get(root, "ambiguous"); err == nil || !strings.Contains(err.Error(), "duplicate property") {
+		t.Fatalf("duplicate identity property was accepted: %v", err)
 	}
 }

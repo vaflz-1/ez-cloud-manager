@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,6 +62,13 @@ const (
 	maxSettingsBlobs = 50
 	// maxSettingsBlobBytes caps any single plugin's settings blob size.
 	maxSettingsBlobBytes = 16 << 10 // 16 KiB
+	// maxProfileIDBytes keeps externally supplied IDs to one small path
+	// component. Generated IDs are 32 bytes, while the wider cap preserves
+	// read compatibility with early hand-authored/legacy IDs.
+	maxProfileIDBytes = 128
+	// maxProfileFileBytes bounds a tampered profile.json before JSON decoding.
+	// It matches the per-entry ceiling used by .ezprofile import.
+	maxProfileFileBytes = 4 << 20 // 4 MiB
 )
 
 // AccountRef references one (provider, account) credential entry by name —
@@ -171,9 +179,10 @@ func List(root string) ([]Profile, error) {
 
 // Get returns one profile by ID.
 func Get(root, id string) (Profile, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Profile{}, errors.New("profile id is required")
+	var err error
+	id, err = validateProfileID(id)
+	if err != nil {
+		return Profile{}, err
 	}
 	p, err := readProfile(root, id)
 	if err != nil {
@@ -329,9 +338,9 @@ func mutateProfileWithRootLock(root, id string, patch func(*Profile) error) (sav
 // base targeted updates on the same stale snapshot and lose one another's
 // fields.
 func mutateProfile(root, id string, patch func(*Profile) error) (saved Profile, err error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return Profile{}, errors.New("profile id is required")
+	id, err = validateProfileID(id)
+	if err != nil {
+		return Profile{}, err
 	}
 	release, err := acquireProfileLock(root, id)
 	if err != nil {
@@ -465,9 +474,9 @@ func Duplicate(root, id, newName string) (created Profile, err error) {
 // check and removal indivisible across different profile IDs; the per-profile
 // lock prevents a writer that read before deletion from recreating the folder.
 func Delete(root, id string) (err error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return errors.New("profile id is required")
+	id, err = validateProfileID(id)
+	if err != nil {
+		return err
 	}
 	releaseRoot, err := acquireRootLock(root)
 	if err != nil {
@@ -512,8 +521,13 @@ func Delete(root, id string) (err error) {
 
 // readProfile loads and validates one profile folder's contents.
 func readProfile(root, dirName string) (Profile, error) {
+	var err error
+	dirName, err = validateProfileID(dirName)
+	if err != nil {
+		return Profile{}, err
+	}
 	path := filepath.Join(root, dirName, "profile.json")
-	data, err := os.ReadFile(path)
+	data, err := readProfileFile(path)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -586,7 +600,57 @@ func readProfile(root, dirName string) (Profile, error) {
 			}
 		}
 	}
+
+	// A profile can be modified outside this process (sync tools, restore,
+	// hand-editing). Re-apply the same validation used by Create/Save after all
+	// legacy migrations, otherwise a tampered file could bypass the secret and
+	// subprocess-hijack environment guards merely by already being on disk.
+	normalized, err := validateProfile(p)
+	if err != nil {
+		return Profile{}, fmt.Errorf("validate %s: %w", path, err)
+	}
+	p.Name = normalized.Name
+	p.EnvVars = normalized.EnvVars
+	p.EnabledPlugins = normalized.EnabledPlugins
+	p.Settings = normalized.Settings
+	p.WindowState = normalized.WindowState
 	return p, nil
+}
+
+func readProfileFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxProfileFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxProfileFileBytes {
+		return nil, fmt.Errorf("profile file %s exceeds the %d MiB size limit", path, maxProfileFileBytes>>20)
+	}
+	return data, nil
+}
+
+// validateProfileID requires exactly one local path component. Generated IDs
+// are lowercase hex, but older test/dev builds admitted other component-safe
+// IDs, so validation preserves those while rejecting traversal, separators,
+// volume names and control characters before any filesystem access.
+func validateProfileID(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", errors.New("profile id is required")
+	}
+	if len(id) > maxProfileIDBytes {
+		return "", fmt.Errorf("profile id must be at most %d bytes", maxProfileIDBytes)
+	}
+	if id == "." || id == ".." || !filepath.IsLocal(id) || filepath.Base(id) != id ||
+		filepath.VolumeName(id) != "" || strings.ContainsAny(id, `/\\`) || hasControlChars(id) {
+		return "", fmt.Errorf("profile id %q must be one safe path component", id)
+	}
+	return id, nil
 }
 
 // ensureContains returns ids with id appended if not already present.
@@ -603,16 +667,25 @@ func ensureContains(ids []string, id string) []string {
 // file in the same directory, chmod 0600, rename) — same discipline as
 // internal/workspace's write.
 func writeProfile(root string, p Profile) error {
-	dir := filepath.Join(root, p.ID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	id, err := validateProfileID(p.ID)
+	if err != nil {
 		return err
 	}
+	p.ID = id
 
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
+	if len(data) > maxProfileFileBytes {
+		return fmt.Errorf("profile %q exceeds the %d MiB size limit", p.ID, maxProfileFileBytes>>20)
+	}
+
+	dir := filepath.Join(root, p.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
 
 	tmp, err := os.CreateTemp(dir, ".profile.*.tmp")
 	if err != nil {

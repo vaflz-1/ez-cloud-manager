@@ -12,6 +12,13 @@
   "description": "Local Google Cloud connection and credential storage.",
   "icon": "cloud.fill",
   "provides": {
-    "operations": ["gcp.credentials.read", "gcp.credentials.write", "gcp.credentials.delete"]
+    "operations": [
+      "gcp.credentials.read",
+      "gcp.credentials.write",
+      "gcp.credentials.delete",
+      "gcp.identity.login",
+      "gcp.projects.discover",
+      "gcp.configurations.sync"
+    ]
   }
 }

@@ -11,24 +11,32 @@
 package awslt
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"ez-cloud-manager/internal/flatjson"
+	"ez-cloud-manager/internal/provider"
 )
 
 // Runner executes an `aws` invocation with the given argv (excluding the binary
 // name) and optional stdin, returning stdout. Tests inject a fake Runner to
 // assert argv construction without touching a real CLI or the network.
 type Runner func(args []string, stdin []byte) ([]byte, error)
+
+const maxAWSOutputBytes = 16 << 20 // 16 MiB per stream
+
+// Variable only so timeout behavior can be pinned without a 90-second test.
+var awsCommandTimeout = 90 * time.Second
 
 // errNoCLI is returned by any operation when the aws binary is not installed.
 var errNoCLI = errors.New("AWS CLI (aws) not found in PATH — install it to use Launch Templates")
@@ -62,24 +70,47 @@ func defaultRunner(args []string, stdin []byte) ([]byte, error) {
 	return runAWS(bin, args, stdin)
 }
 
-// runAWS execs bin with args, returning stdout on success. On a non-zero exit it
-// returns an error carrying the trimmed stderr so the CLI's own diagnostics
-// (e.g. "An error occurred (InvalidLaunchTemplateName.NotFound) ...") surface.
+// runAWS executes the already-resolved CLI through the same hardened vendor
+// boundary as Test Connection: trusted path, allowlisted environment, bounded
+// output and whole-process-group cancellation. Vendor stderr is deliberately
+// not returned because it may contain account metadata or credential-helper
+// output.
 func runAWS(bin string, args []string, stdin []byte) ([]byte, error) {
-	cmd := exec.Command(bin, args...)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
+	ctx, cancel := context.WithTimeout(context.Background(), awsCommandTimeout)
+	defer cancel()
+	overrides, err := awsVendorOverrides()
+	if err != nil {
+		return nil, err
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, errors.New(msg)
+	result, runErr := provider.RunVendorCommandWithInput(
+		ctx, bin, args, overrides, stdin, maxAWSOutputBytes,
+	)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("aws command timed out after %s", awsCommandTimeout)
+	}
+	if runErr != nil {
+		return nil, fmt.Errorf("AWS CLI could not complete the requested EC2 operation: %w", runErr)
+	}
+	return result.Stdout, nil
+}
+
+func awsVendorOverrides() (map[string]string, error) {
+	overrides := map[string]string{
+		"AWS_CLI_AUTO_PROMPT":       "off",
+		"AWS_EC2_METADATA_DISABLED": "true",
+		"AWS_PAGER":                 "",
+	}
+	for _, key := range []string{"AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
 		}
-		return nil, fmt.Errorf("aws %s: %w", strings.Join(args, " "), err)
+		if !filepath.IsAbs(value) {
+			return nil, fmt.Errorf("%s must be an absolute path", key)
+		}
+		overrides[key] = filepath.Clean(value)
 	}
-	return stdout.Bytes(), nil
+	return overrides, nil
 }
 
 // Client targets one AWS profile and region. Run overrides the CLI executor in

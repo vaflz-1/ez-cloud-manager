@@ -26,6 +26,10 @@ func TestRegisteredProviderInfosComeFromConnectorManifests(t *testing.T) {
 		if infos[i].ID != id || infos[i].DisplayName != manifest.Name || infos[i].Icon != manifest.Icon {
 			t.Errorf("provider info[%d] = %+v, want metadata from %+v", i, infos[i], manifest)
 		}
+		wantAuth := id == "aws" || id == "gcp"
+		if infos[i].CanAuthenticate != wantAuth || infos[i].CanSync != wantAuth {
+			t.Errorf("provider capability[%s] auth=%v sync=%v, want %v", id, infos[i].CanAuthenticate, infos[i].CanSync, wantAuth)
+		}
 	}
 }
 

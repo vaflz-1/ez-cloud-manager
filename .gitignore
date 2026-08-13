@@ -19,6 +19,36 @@ credentials.bak.*
 *.p12
 *.mobileprovision
 *.cer
+*.p8
+*.ppk
+*.jks
+*.keystore
+*.ovpn
+*.ezprofile
+.envrc
+.direnv/
+
+# Cloud / cluster credentials and local provider state
+.aws/
+.azure/
+.config/gcloud/
+.kube/
+**/application_default_credentials.json
+**/azureProfile.json
+**/accessTokens.json
+**/credentials
+**/kubeconfig
+id_rsa
+id_ed25519
+
+# IaC state and variable values (lock files remain tracked)
+.terraform/
+.tofu/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.tfplan
 
 # ── Claude Code / ruflo / AI tooling (local dev only — never part of the app) ──
 .claude/
@@ -58,3 +88,11 @@ node_modules/
 *.out.tmp
 coverage*
 cov_*
+
+# Security scanner output can contain matched/redacted source context
+gitleaks-report.*
+trufflehog-report.*
+govulncheck-report.*
+grype-report.*
+*.sarif
+*.log

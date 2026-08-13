@@ -16,6 +16,9 @@
       "aws.credentials.read",
       "aws.credentials.write",
       "aws.credentials.delete",
+      "aws.sso.profiles.discover",
+      "aws.sso.login",
+      "aws.sso.profiles.sync",
       "aws.ec2.launchTemplates.read",
       "aws.ec2.launchTemplates.write"
     ]

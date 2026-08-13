@@ -61,6 +61,10 @@ extension CloudAccountsWindowController {
             showError("Select a connection first.")
             return
         }
+        if profileSummary(name, provider: provider)?.isReadOnly == true {
+            showError("This connection is managed by the provider CLI. Change or remove it there, then Refresh Connections.")
+            return
+        }
 
         // Pre-check: some providers (gcp today) refuse to delete their own
         // active/default entry. Route straight to the guided sheet BEFORE
@@ -203,6 +207,10 @@ extension CloudAccountsWindowController {
     }
 
     @objc func addVariable() {
+        guard !selectedConnectionIsReadOnly() else {
+            showError("This connection is managed by the provider CLI and cannot be edited here.")
+            return
+        }
         fieldRows.append(FieldRow(key: "", value: ""))
         let newIdx = fieldRows.count - 1
         reloadFieldsTable()
@@ -218,6 +226,10 @@ extension CloudAccountsWindowController {
     }
 
     @objc func removeVariable() {
+        guard !selectedConnectionIsReadOnly() else {
+            showError("This connection is managed by the provider CLI and cannot be edited here.")
+            return
+        }
         let disp = fieldsTable.selectedRow
         guard disp >= 0, disp < displayItems.count, case .field(let idx) = displayItems[disp] else {
             return
@@ -240,6 +252,10 @@ extension CloudAccountsWindowController {
 
     @objc func saveProfile() {
         commitActiveEdits()
+        if selectedConnectionIsReadOnly() {
+            showError("This connection is managed by the provider CLI and cannot be edited here.")
+            return
+        }
         _ = applyParsedCredentialsFromPaste(force: false, userInitiated: false)
 
         let provider = currentEditingProvider()
@@ -256,13 +272,26 @@ extension CloudAccountsWindowController {
         }
 
         let wasExisting = profileExists(name, provider: provider)
+        let updatesLoadedConnection = editorBaseline?.provider == provider
+            && editorBaseline?.name == name
+        let expectedFields = updatesLoadedConnection ? editorBaseline?.persistedFields : nil
+        let expectAbsent = !updatesLoadedConnection
         let env = profile.envVars.asDictionary()
         connectionSaveGeneration += 1
         let generation = connectionSaveGeneration
         let editorGeneration = editorContextGeneration
         saveButton.isEnabled = false
         setStatus("Saving \(name)…")
-        service.runAsync({ try self.service.save(provider: provider, name, fields: fields, extraEnv: env) }) { [weak self] result in
+        service.runAsync({
+            try self.service.save(
+                provider: provider,
+                name,
+                fields: fields,
+                expectedFields: expectedFields,
+                expectAbsent: expectAbsent,
+                extraEnv: env
+            )
+        }) { [weak self] result in
             guard let self,
                   generation == self.connectionSaveGeneration,
                   editorGeneration == self.editorContextGeneration
@@ -292,6 +321,10 @@ extension CloudAccountsWindowController {
             }
             updateProfileMode()
             setStatus(wasExisting ? "Updated \(name) · \(savedCount) field(s)" : "Created \(name) · \(savedCount) field(s)")
+            case .failure(CredentialsService.ServiceError.connectionConflict):
+                updateProfileMode()
+                setStatus("Save blocked · \(name) changed outside this editor")
+                showError("\(name) changed after you opened it. Your draft is preserved. Refresh the connections, review the newer values, then save again.")
             case .failure(let error):
                 updateProfileMode()
                 showError(error.localizedDescription)

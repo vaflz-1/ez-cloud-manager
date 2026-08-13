@@ -28,6 +28,19 @@ INSTALLED_CLI_PATH="$APP_PATH/Contents/Resources/ezcloud"
 ICON_BASENAME="EZCloudManagerAppIcon"
 ICON_FILE="$PROJECT_DIR/assets/$ICON_BASENAME.icns"
 SWIFT_TARGET="${EZCLOUD_SWIFT_TARGET:-$(uname -m)-apple-macosx13.0}"
+GO_BIN="${EZCLOUD_GO_BIN:-}"
+if [ -z "$GO_BIN" ]; then
+  if [ -x /opt/homebrew/bin/go ]; then
+    GO_BIN=/opt/homebrew/bin/go
+  else
+    GO_BIN="$(command -v go || true)"
+  fi
+fi
+if [ -z "$GO_BIN" ] || [ ! -x "$GO_BIN" ]; then
+  echo "error: Go toolchain not found; set EZCLOUD_GO_BIN to an absolute executable path" >&2
+  exit 1
+fi
+SWIFT_PATH_FLAGS=(-file-prefix-map "$PROJECT_DIR=." -debug-prefix-map "$PROJECT_DIR=.")
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 pkill -x EZCloudManager 2>/dev/null || true
@@ -43,13 +56,13 @@ mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$DIST_DIR"
 swift "$PROJECT_DIR/tools/generate-icon.swift"
 
 if [ "${EZCLOUD_BUILD_MODE:-release}" = "debug" ]; then
-  go build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
-  swiftc -target "$SWIFT_TARGET" "$PROJECT_DIR"/ui/*.swift \
+  "$GO_BIN" build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
+  swiftc -target "$SWIFT_TARGET" "${SWIFT_PATH_FLAGS[@]}" "$PROJECT_DIR"/ui/*.swift \
     -o "$BUILD_APP/Contents/MacOS/EZCloudManager" \
     -framework AppKit
 else
-  go build -trimpath -ldflags="-s -w" -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
-  swiftc -target "$SWIFT_TARGET" -O -whole-module-optimization "$PROJECT_DIR"/ui/*.swift \
+  "$GO_BIN" build -trimpath -ldflags="-s -w" -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
+  swiftc -target "$SWIFT_TARGET" -O -whole-module-optimization "${SWIFT_PATH_FLAGS[@]}" "$PROJECT_DIR"/ui/*.swift \
     -o "$BUILD_APP/Contents/MacOS/EZCloudManager" \
     -framework AppKit
 fi

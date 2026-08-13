@@ -4,12 +4,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"ez-cloud-manager/internal/plugin"
 )
+
+const (
+	maxEnvKeyBytes   = 128
+	maxEnvValueBytes = 16 << 10 // 16 KiB, enough for paths/context but not blobs
+)
+
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // validateProfile returns a normalized copy (trimmed name, normalized env
 // vars/settings) or an error if any field is invalid. It never copies
@@ -102,6 +110,12 @@ func normalizeEnvVars(in []EnvVar) ([]EnvVar, error) {
 		value := strings.TrimSpace(e.Value)
 		if key == "" {
 			return nil, errors.New("environment variable key must not be empty")
+		}
+		if len(key) > maxEnvKeyBytes || !envKeyRe.MatchString(key) {
+			return nil, fmt.Errorf("environment variable key %q must be a POSIX name of at most %d bytes", key, maxEnvKeyBytes)
+		}
+		if len(value) > maxEnvValueBytes {
+			return nil, fmt.Errorf("environment variable %q exceeds %d bytes", key, maxEnvValueBytes)
 		}
 		if hasControlChars(key) || hasControlChars(value) {
 			return nil, errors.New("environment variable must not contain control characters")
@@ -227,11 +241,12 @@ func looksLikeSecret(key string) bool {
 // rejection, just like looksLikeSecret, not a UI-only warning.
 func looksLikeHijackVar(key string) bool {
 	k := strings.ToUpper(strings.TrimSpace(key))
-	if strings.HasPrefix(k, "LD_") || strings.HasPrefix(k, "DYLD_") {
+	if strings.HasPrefix(k, "LD_") || strings.HasPrefix(k, "DYLD_") ||
+		strings.HasPrefix(k, "EZCLOUD_") || strings.HasPrefix(k, "KERVIK_") {
 		return true
 	}
 	switch k {
-	case "PATH", "SHELL", "IFS", "ENV", "BASH_ENV",
+	case "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "IFS", "ENV", "BASH_ENV",
 		"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
 		"NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
 		"GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GCONV_PATH":

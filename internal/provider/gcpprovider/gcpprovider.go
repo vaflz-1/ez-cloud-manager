@@ -8,13 +8,11 @@
 package gcpprovider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
+	"errors"
+	"fmt"
 	"strings"
-	"time"
 
 	"ez-cloud-manager/internal/gcpcreds"
 	"ez-cloud-manager/internal/provider"
@@ -23,6 +21,20 @@ import (
 const id = "gcp"
 
 type gcpProvider struct{}
+
+var _ provider.ConditionalSaver = gcpProvider{}
+
+// SaveBatchIfUnchanged is consumed by the GCP sign-in synchronizer. It keeps
+// the concrete batch DTO in gcpcreds so the provider-wide CRUD contract stays
+// small while still preserving provider.ErrConnectionConflict at the public
+// boundary.
+func (gcpProvider) SaveBatchIfUnchanged(path string, changes []gcpcreds.ConditionalSave) error {
+	err := gcpcreds.SaveBatchIfUnchanged(path, changes)
+	if errors.Is(err, gcpcreds.ErrConflict) {
+		return provider.ErrConnectionConflict
+	}
+	return err
+}
 
 // New returns the Google Cloud provider, backed by gcloud's own
 // configurations directory.
@@ -56,6 +68,14 @@ func (gcpProvider) Get(path, name string) (provider.Profile, error) {
 
 func (gcpProvider) Save(path, name string, fields map[string]string) error {
 	return gcpcreds.Save(path, name, fields)
+}
+
+func (gcpProvider) SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	err := gcpcreds.SaveIfUnchanged(path, name, fields, expectedFields, expectAbsent)
+	if errors.Is(err, gcpcreds.ErrConflict) {
+		return provider.ErrConnectionConflict
+	}
+	return err
 }
 
 func (gcpProvider) Delete(path, name string) error {
@@ -93,59 +113,99 @@ func (gcpProvider) Activate(path, name string) error {
 
 func (gcpProvider) ActivateLabel() string { return "Set as active gcloud configuration" }
 
-// Check runs `gcloud auth list` scoped to the named configuration via
-// CLOUDSDK_ACTIVE_CONFIG_NAME — gcloud's documented one-shot override for
-// which configuration a single invocation uses, WITHOUT touching the
-// on-disk active_config marker (unlike Activate). path is the CLOUDSDK_CONFIG
-// root (see gcpcreds.DefaultPath). A missing gcloud binary or a failed call
-// is reported via CheckResult, never a Go error.
+// Check captures the selected configuration into a temporary non-active
+// configuration containing only core.account/core.project. gcloud still owns
+// and reads its credential database, but mutable impersonation, proxy,
+// endpoint and TLS properties from the source configuration cannot affect the
+// verification request.
 func (gcpProvider) Check(ctx context.Context, path, name string) (provider.CheckResult, error) {
-	bin, err := exec.LookPath("gcloud")
+	stored, err := gcpcreds.Get(path, name)
 	if err != nil {
-		return provider.CheckResult{OK: false, Error: "gcloud CLI not found in PATH"}, nil
+		return provider.CheckResult{}, err
+	}
+	snapshot, snapshotErr := prepareGCPCheckSnapshot(path, stored.Fields)
+	if snapshotErr != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud configuration could not be isolated for a safe verification"}, nil
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if snapshot.project != "" {
+		return checkGCPProject(ctx, path, &snapshot)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, "auth", "list", "--format=json")
-	cmd.Env = append(os.Environ(), "CLOUDSDK_CONFIG="+path, "CLOUDSDK_ACTIVE_CONFIG_NAME="+name)
-	// See awsprovider.Check's identical field for why this is required, not
-	// optional: gcloud (or a wrapper script around it) spawning a child of
-	// its own means killing gcloud alone on ctx expiry can still leave
-	// cmd.Wait blocked on that orphaned child holding the output pipes open.
-	cmd.WaitDelay = 2 * time.Second
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if ctx.Err() == context.DeadlineExceeded {
-			msg = "timed out waiting for gcloud auth list"
-		} else if msg == "" {
-			msg = err.Error()
-		}
-		return provider.CheckResult{OK: false, Error: msg}, nil
+	result, runErr := provider.RunVendorCommand(
+		ctx,
+		"gcloud",
+		[]string{
+			"auth", "list", "--filter=status:ACTIVE", "--format=json(account,status)",
+			"--configuration", snapshot.name,
+		},
+		map[string]string{"CLOUDSDK_CONFIG": path},
+		1<<20,
+	)
+	if errors.Is(runErr, context.DeadlineExceeded) {
+		return provider.CheckResult{OK: false, Error: "timed out waiting for gcloud auth list"}, nil
+	}
+	if runErr != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud could not verify credentials for this configuration"}, nil
+	}
+	if cleanupErr := snapshot.cleanup(); cleanupErr != nil {
+		return provider.CheckResult{}, fmt.Errorf("remove isolated gcloud verification files: %w", cleanupErr)
 	}
 
 	var accounts []struct {
 		Account string
 		Status  string
 	}
-	_ = json.Unmarshal(stdout.Bytes(), &accounts)
+	if err := json.Unmarshal(result.Stdout, &accounts); err != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud returned malformed account JSON"}, nil
+	}
 	for _, a := range accounts {
-		if a.Status == "ACTIVE" {
-			identity := map[string]string{"account": a.Account}
-			// The project id comes from the STORED configuration's own
-			// fields, not a second live gcloud call — `gcloud auth list`
-			// doesn't carry it, and this configuration's file is already
-			// ours to read directly.
-			if stored, err := gcpcreds.Get(path, name); err == nil {
-				if proj := stored.Fields[gcpcreds.KeyProject]; proj != "" {
-					identity["project"] = proj
-				}
-			}
-			return provider.CheckResult{OK: true, Identity: identity}, nil
+		if a.Status == "ACTIVE" && strings.TrimSpace(a.Account) == snapshot.account {
+			return provider.CheckResult{OK: true, Identity: map[string]string{
+				"account":      a.Account,
+				"verification": "credentials-present",
+			}}, nil
 		}
 	}
 	return provider.CheckResult{OK: false, Error: "no active/authenticated account for this configuration"}, nil
+}
+
+func checkGCPProject(ctx context.Context, root string, snapshot *gcpCheckSnapshot) (provider.CheckResult, error) {
+	result, runErr := provider.RunVendorCommand(
+		ctx,
+		"gcloud",
+		[]string{
+			"projects", "describe", snapshot.project,
+			"--configuration", snapshot.name,
+			"--format=json(projectId,projectNumber)",
+		},
+		map[string]string{"CLOUDSDK_CONFIG": root},
+		1<<20,
+	)
+	if errors.Is(runErr, context.DeadlineExceeded) {
+		return provider.CheckResult{OK: false, Error: "timed out verifying the Google Cloud project"}, nil
+	}
+	if runErr != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud could not verify this Google Cloud project"}, nil
+	}
+	if cleanupErr := snapshot.cleanup(); cleanupErr != nil {
+		return provider.CheckResult{}, fmt.Errorf("remove isolated gcloud verification files: %w", cleanupErr)
+	}
+	var identity struct {
+		ProjectID     string `json:"projectId"`
+		ProjectNumber string `json:"projectNumber"`
+	}
+	if err := json.Unmarshal(result.Stdout, &identity); err != nil {
+		return provider.CheckResult{OK: false, Error: "gcloud returned malformed project JSON"}, nil
+	}
+	if identity.ProjectID != snapshot.project || identity.ProjectNumber == "" {
+		return provider.CheckResult{OK: false, Error: fmt.Sprintf("gcloud returned an unexpected project identity for %q", snapshot.project)}, nil
+	}
+	return provider.CheckResult{OK: true, Identity: map[string]string{
+		"project":       identity.ProjectID,
+		"projectNumber": identity.ProjectNumber,
+		"verification":  "live",
+	}}, nil
 }
 
 func init() { provider.Register(New()) }

@@ -52,6 +52,15 @@ extension CloudAccountsWindowController {
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier.rawValue {
+        case "sync":
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Sign In / Sync"
+            item.toolTip = "Sign in with AWS or Google Cloud and review connections to import"
+            item.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "Sign In and Sync")
+            item.target = self
+            item.action = #selector(openConnectionSyncSheet)
+            item.isBordered = true
+            return item
         case "scope":
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Visible Connections"
@@ -75,7 +84,7 @@ extension CloudAccountsWindowController {
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .flexibleSpace, .init("scope"), .init("refresh")]
+        [.toggleSidebar, .flexibleSpace, .init("sync"), .init("scope"), .init("refresh")]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {

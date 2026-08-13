@@ -11,6 +11,8 @@ package azurecreds
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,6 +67,10 @@ type Parsed struct {
 	Notes       []string          `json:"notes,omitempty"`
 }
 
+// ErrConflict is returned when a conditional save's editor baseline no longer
+// matches the profile currently on disk.
+var ErrConflict = errors.New("Azure connection profile changed since it was loaded")
+
 // DefaultPath honors EZCLOUD_AZURE_PROFILES_FILE, then EZCLOUD_CONFIG_DIR,
 // then ~/.config/ezcloud/azure_profiles.ini.
 func DefaultPath() (string, error) {
@@ -115,7 +121,17 @@ func Get(path, name string) (Profile, error) {
 	return Profile{Name: model.Sections[idx].Name, Fields: model.Sections[idx].Fields()}, nil
 }
 
-func Save(path, name string, fields map[string]string) (resultErr error) {
+func Save(path, name string, fields map[string]string) error {
+	return save(path, name, fields, nil, false, false)
+}
+
+// SaveIfUnchanged compares and writes while holding the same profile-store
+// lock, preventing a stale editor from overwriting a concurrent update.
+func SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	return save(path, name, fields, expectedFields, expectAbsent, true)
+}
+
+func save(path, name string, fields, expectedFields map[string]string, expectAbsent, conditional bool) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if err := inifile.ValidateSectionName(name); err != nil {
 		return err
@@ -124,6 +140,14 @@ func Save(path, name string, fields map[string]string) (resultErr error) {
 	for key, value := range normalized {
 		if err := inifile.ValidateField(key, value); err != nil {
 			return err
+		}
+	}
+	expected := normalizeFields(expectedFields)
+	if conditional {
+		for key, value := range expected {
+			if err := inifile.ValidateField(key, value); err != nil {
+				return fmt.Errorf("validate expected Azure field: %w", err)
+			}
 		}
 	}
 	release, err := pathlock.Acquire(path)
@@ -139,6 +163,16 @@ func Save(path, name string, fields map[string]string) (resultErr error) {
 		return err
 	}
 	idx := model.FindSection(name)
+	if conditional {
+		exists := idx >= 0
+		if expectAbsent {
+			if exists {
+				return ErrConflict
+			}
+		} else if !exists || !maps.Equal(model.Sections[idx].Fields(), expected) {
+			return ErrConflict
+		}
+	}
 	if idx < 0 {
 		model.Sections = append(model.Sections, inifile.Section{Name: name})
 		idx = len(model.Sections) - 1

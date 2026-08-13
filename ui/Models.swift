@@ -8,6 +8,8 @@ import Foundation
 struct ProfileSummary: Codable {
     let name: String
     let keys: [String]
+    let source: String?
+    let readOnly: Bool?
     /// Marks the provider's own active/default entry (currently only gcloud
     /// configurations set this — see internal/provider.ProfileSummary.Active).
     /// Optional/omitted, not just false-by-default, so a provider that
@@ -15,6 +17,21 @@ struct ProfileSummary: Codable {
     let active: Bool?
 
     var isActive: Bool { active ?? false }
+    var isReadOnly: Bool { readOnly ?? false }
+
+    init(
+        name: String,
+        keys: [String],
+        source: String? = nil,
+        readOnly: Bool? = nil,
+        active: Bool? = nil
+    ) {
+        self.name = name
+        self.keys = keys
+        self.source = source
+        self.readOnly = readOnly
+        self.active = active
+    }
 }
 
 struct ListResponse: Codable {
@@ -52,6 +69,11 @@ struct ParseResponse: Codable {
 
 struct SaveRequest: Codable {
     let fields: [String: String]
+    /// Existing-editor baseline. nil means the caller is using the legacy
+    /// unconditional contract; an empty dictionary is a real empty profile.
+    let expectedFields: [String: String]?
+    /// New-connection precondition: fail if this name appeared since drafting.
+    let expectAbsent: Bool
 }
 
 /// One provider backend as reported by `ezcloud providers`.
@@ -60,6 +82,12 @@ struct ProviderInfo: Codable {
     let displayName: String
     let canActivate: Bool
     let activateLabel: String?
+    let canAuthenticate: Bool?
+    let canSync: Bool?
+
+    var supportsConnectionAuth: Bool {
+        (canAuthenticate ?? false) && (canSync ?? false)
+    }
 }
 
 /// One known field in a provider's schema (`ezcloud schema`). Bool/String

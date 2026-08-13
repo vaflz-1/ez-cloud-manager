@@ -7,14 +7,14 @@
 package awsprovider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
-	"time"
 
 	"ez-cloud-manager/internal/awscreds"
 	"ez-cloud-manager/internal/provider"
@@ -25,6 +25,8 @@ const id = "aws"
 // awsProvider delegates every operation to the existing awscreds package,
 // converting between its concrete types and the provider-agnostic DTOs.
 type awsProvider struct{}
+
+var _ provider.ConditionalSaver = awsProvider{}
 
 // New returns the AWS credentials provider, backed by ~/.aws/credentials.
 func New() provider.Provider { return awsProvider{} }
@@ -39,10 +41,39 @@ func (awsProvider) List(path string) ([]provider.ProfileSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]provider.ProfileSummary, len(summaries))
-	for i, s := range summaries {
-		out[i] = provider.ProfileSummary{Name: s.Name, Keys: s.Keys}
+	out := make([]provider.ProfileSummary, 0, len(summaries))
+	seen := make(map[string]bool, len(summaries))
+	for _, s := range summaries {
+		seen[s.Name] = true
+		out = append(out, provider.ProfileSummary{Name: s.Name, Keys: s.Keys})
 	}
+	configPath, configErr := configPathFor(path)
+	if configErr == nil {
+		configProfiles, configErr := awscreds.ListConfigProfiles(configPath)
+		if configErr != nil {
+			return nil, configErr
+		}
+		for _, s := range configProfiles {
+			profile, err := awscreds.GetConfigProfile(configPath, s.Name)
+			if err != nil {
+				return nil, err
+			}
+			if !isAWSManagedSSO(profile.Fields) || hasUnsafeSSOResolution(profile.Fields) {
+				continue
+			}
+			if seen[s.Name] {
+				// A credentials section with the same name wins in AWS's
+				// effective resolution. Do not present this as a safe SSO
+				// connection; auth discovery will surface the collision for
+				// explicit review instead.
+				continue
+			}
+			out = append(out, provider.ProfileSummary{
+				Name: s.Name, Keys: s.Keys, Source: "sso", ReadOnly: true,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
@@ -51,15 +82,142 @@ func (awsProvider) Get(path, name string) (provider.Profile, error) {
 	if err != nil {
 		return provider.Profile{}, err
 	}
+	if len(p.Fields) > 0 {
+		return provider.Profile{Name: p.Name, Fields: p.Fields}, nil
+	}
+	configPath, err := configPathFor(path)
+	if err != nil {
+		return provider.Profile{}, err
+	}
+	configProfile, err := awscreds.GetConfigProfile(configPath, name)
+	if err != nil {
+		return provider.Profile{}, err
+	}
+	if isAWSManagedSSO(configProfile.Fields) && !hasUnsafeSSOResolution(configProfile.Fields) {
+		return provider.Profile{Name: configProfile.Name, Fields: safeSSOFields(configProfile.Fields)}, nil
+	}
+	if isAWSManagedSSO(configProfile.Fields) {
+		return provider.Profile{}, fmt.Errorf(
+			"AWS SSO profile %q contains credential or endpoint overrides and is blocked for safety",
+			name,
+		)
+	}
 	return provider.Profile{Name: p.Name, Fields: p.Fields}, nil
 }
 
+func isAWSManagedSSO(fields map[string]string) bool {
+	return strings.TrimSpace(fields[awscreds.KeySSOSession]) != "" ||
+		(strings.TrimSpace(fields[awscreds.KeySSOStartURL]) != "" &&
+			strings.TrimSpace(fields[awscreds.KeySSORegion]) != "")
+}
+
+// hasUnsafeSSOResolution rejects settings that can replace the selected SSO
+// identity, execute a local helper, redirect vendor traffic, or alter TLS
+// trust. Auto-discovered profiles have not been authored or reviewed inside
+// Kervik, so they must be stricter than manually-managed credential records.
+func hasUnsafeSSOResolution(fields map[string]string) bool {
+	unsafe := []string{
+		awscreds.KeyAccessKeyID,
+		awscreds.KeySecretAccessKey,
+		awscreds.KeySessionToken,
+		awscreds.KeyCredentialProc,
+		awscreds.KeyCredentialSrc,
+		awscreds.KeyRoleArn,
+		awscreds.KeySourceProfile,
+		awscreds.KeyWebIdentityFile,
+		awscreds.KeyEndpointURL,
+		awscreds.KeyCABundle,
+		"login_session",
+		"services",
+	}
+	for _, key := range unsafe {
+		if strings.TrimSpace(fields[key]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func safeSSOFields(fields map[string]string) map[string]string {
+	allowed := []string{
+		awscreds.KeySSOSession,
+		awscreds.KeySSORegion,
+		awscreds.KeySSOAccountID,
+		awscreds.KeySSORoleName,
+		awscreds.KeyRegion,
+		awscreds.KeyOutput,
+	}
+	out := make(map[string]string, len(allowed))
+	for _, key := range allowed {
+		if value := strings.TrimSpace(fields[key]); value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 func (awsProvider) Save(path, name string, fields map[string]string) error {
+	managed, err := isExternalSSOProfile(path, name)
+	if err != nil {
+		return err
+	}
+	if managed || isAWSManagedSSO(fields) {
+		return fmt.Errorf("AWS SSO profiles are managed by the AWS CLI; use Sign In / Sync instead of saving them as credentials")
+	}
 	return awscreds.Save(path, name, fields)
 }
 
+func (awsProvider) SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	managed, err := isExternalSSOProfile(path, name)
+	if err != nil {
+		return err
+	}
+	if managed || isAWSManagedSSO(fields) || isAWSManagedSSO(expectedFields) {
+		return fmt.Errorf("AWS SSO profiles are managed by the AWS CLI; use Sign In / Sync instead of saving them as credentials")
+	}
+	err = awscreds.SaveIfUnchanged(path, name, fields, expectedFields, expectAbsent)
+	if errors.Is(err, awscreds.ErrConflict) {
+		return provider.ErrConnectionConflict
+	}
+	return err
+}
+
+func isExternalSSOProfile(credentialsPath, name string) (bool, error) {
+	configPath, err := configPathFor(credentialsPath)
+	if err != nil {
+		return false, err
+	}
+	profile, err := awscreds.GetConfigProfile(configPath, name)
+	if err != nil {
+		return false, err
+	}
+	return isAWSManagedSSO(profile.Fields), nil
+}
+
 func (awsProvider) Delete(path, name string) error {
+	configPath, err := configPathFor(path)
+	if err == nil {
+		configProfile, getErr := awscreds.GetConfigProfile(configPath, name)
+		if getErr == nil && isAWSManagedSSO(configProfile.Fields) {
+			return fmt.Errorf("AWS SSO profile %q is managed by the AWS CLI and cannot be deleted here", name)
+		}
+	}
 	return awscreds.Delete(path, name)
+}
+
+func configPathFor(credentialsPath string) (string, error) {
+	if override := strings.TrimSpace(os.Getenv("AWS_CONFIG_FILE")); override != "" {
+		return override, nil
+	}
+	defaultCredentials, err := awscreds.DefaultPath()
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(credentialsPath) == filepath.Clean(defaultCredentials) {
+		return awscreds.DefaultConfigPath()
+	}
+	// Directly-injected/test credential paths are isolated from the real home.
+	return filepath.Join(filepath.Dir(credentialsPath), "config"), nil
 }
 
 func (awsProvider) Parse(text string) provider.Parsed {
@@ -94,11 +252,10 @@ func (awsProvider) Schema() provider.Schema {
 			{Key: awscreds.KeyRetryMode, Display: "AWS_RETRY_MODE", Env: "AWS_RETRY_MODE", Placeholder: "standard"},
 			{Key: awscreds.KeyMaxAttempts, Display: "AWS_MAX_ATTEMPTS", Env: "AWS_MAX_ATTEMPTS", Placeholder: "3"},
 			{Key: awscreds.KeySTSEndpoints, Display: "AWS_STS_REGIONAL_ENDPOINTS", Env: "AWS_STS_REGIONAL_ENDPOINTS", Placeholder: "regional"},
-			{Key: awscreds.KeySSOSession, Display: "sso_session", Placeholder: "my-sso"},
-			{Key: awscreds.KeySSOStartURL, Display: "sso_start_url", Placeholder: "https://my.awsapps.com/start"},
-			{Key: awscreds.KeySSORegion, Display: "sso_region", Placeholder: "us-east-1"},
-			{Key: awscreds.KeySSOAccountID, Display: "sso_account_id", Placeholder: "123456789012"},
-			{Key: awscreds.KeySSORoleName, Display: "sso_role_name", Placeholder: "PowerUserAccess"},
+			// IAM Identity Center fields live in ~/.aws/config, not the
+			// credentials store edited by this schema. They are rendered as
+			// read-only extras for discovered SSO profiles and created only
+			// through the explicit Sign In / Sync flow.
 		},
 	}
 }
@@ -141,32 +298,43 @@ func (awsProvider) ActivateLabel() string { return "Copy to [default] profile" }
 // this call's own error return is reserved for something that prevented it
 // from even attempting the check.
 func (awsProvider) Check(ctx context.Context, path, name string) (provider.CheckResult, error) {
-	bin, err := exec.LookPath("aws")
-	if err != nil {
-		return provider.CheckResult{OK: false, Error: "AWS CLI (aws) not found in PATH"}, nil
+	configPath, configErr := configPathFor(path)
+	if configErr != nil {
+		return provider.CheckResult{}, configErr
 	}
+	snapshot, snapshotErr := prepareAWSCheckSnapshot(path, configPath, name)
+	if snapshotErr != nil {
+		return provider.CheckResult{
+			OK:    false,
+			Error: "AWS connection could not be isolated for a safe verification",
+		}, nil
+	}
+	defer func() { _ = snapshot.cleanup() }()
 
-	cmd := exec.CommandContext(ctx, bin, "sts", "get-caller-identity", "--profile", name, "--output", "json")
-	cmd.Env = append(os.Environ(), "AWS_SHARED_CREDENTIALS_FILE="+path)
-	// If aws is (or wraps, e.g. a credential-process/SSO shell script) a
-	// process that spawns a child of its own, killing aws alone on ctx
-	// expiry is not enough: the orphaned grandchild can still hold the
-	// stdout/stderr pipes open, and cmd.Wait would otherwise block on that
-	// pipe's EOF until the grandchild exits on its own — silently defeating
-	// the timeout. WaitDelay bounds that: past this grace period after
-	// Cancel, exec force-closes the pipes so Wait returns promptly.
-	cmd.WaitDelay = 2 * time.Second
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if ctx.Err() == context.DeadlineExceeded {
-			msg = "timed out waiting for aws sts get-caller-identity"
-		} else if msg == "" {
-			msg = err.Error()
-		}
-		return provider.CheckResult{OK: false, Error: msg}, nil
+	result, runErr := provider.RunVendorCommand(
+		ctx,
+		"aws",
+		[]string{"sts", "get-caller-identity", "--profile", name, "--output", "json", "--no-cli-pager"},
+		map[string]string{
+			"AWS_CLI_AUTO_PROMPT":         "off",
+			"AWS_CONFIG_FILE":             snapshot.configPath,
+			"AWS_EC2_METADATA_DISABLED":   "true",
+			"AWS_PAGER":                   "",
+			"AWS_SHARED_CREDENTIALS_FILE": snapshot.credentialsPath,
+		},
+		1<<20,
+	)
+	if errors.Is(runErr, context.DeadlineExceeded) {
+		return provider.CheckResult{OK: false, Error: "timed out waiting for aws sts get-caller-identity"}, nil
+	}
+	if runErr != nil {
+		// Vendor diagnostics may include account identifiers, browser URLs,
+		// credential-process output, or temporary auth material. Keep them out
+		// of the app-facing JSON just as the interactive auth runner does.
+		return provider.CheckResult{OK: false, Error: "AWS CLI could not verify this connection"}, nil
+	}
+	if cleanupErr := snapshot.cleanup(); cleanupErr != nil {
+		return provider.CheckResult{}, fmt.Errorf("remove isolated AWS verification files: %w", cleanupErr)
 	}
 
 	var identity struct {
@@ -174,7 +342,15 @@ func (awsProvider) Check(ctx context.Context, path, name string) (provider.Check
 		Arn     string
 		UserId  string
 	}
-	_ = json.Unmarshal(stdout.Bytes(), &identity)
+	if err := json.Unmarshal(result.Stdout, &identity); err != nil {
+		return provider.CheckResult{OK: false, Error: "AWS CLI returned malformed identity JSON"}, nil
+	}
+	if strings.TrimSpace(identity.Account) == "" || strings.TrimSpace(identity.Arn) == "" {
+		return provider.CheckResult{OK: false, Error: "AWS CLI returned an incomplete caller identity"}, nil
+	}
+	if snapshot.expectedAccount != "" && identity.Account != snapshot.expectedAccount {
+		return provider.CheckResult{OK: false, Error: "AWS CLI returned a different account than the SSO profile declares"}, nil
+	}
 	return provider.CheckResult{OK: true, Identity: map[string]string{
 		"account": identity.Account,
 		"arn":     identity.Arn,

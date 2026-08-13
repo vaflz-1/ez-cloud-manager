@@ -8,15 +8,32 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 )
 
+// ConnectionConflictMarker is a stable, machine-readable prefix emitted by
+// the CLI when an optimistic connection save loses a race. Keep the marker
+// independent of the human-readable text so native clients can classify the
+// failure without coupling behavior to wording.
+const ConnectionConflictMarker = "EZCLOUD_CONNECTION_CONFLICT"
+
+// ErrConnectionConflict means a connection changed (or appeared/disappeared)
+// after the caller loaded its editor baseline. Callers should refresh or
+// explicitly merge instead of silently overwriting the newer value.
+var ErrConnectionConflict = errors.New(ConnectionConflictMarker + ": connection changed since draft was loaded")
+
 // ProfileSummary is a provider-agnostic profile listing entry.
 type ProfileSummary struct {
 	Name string   `json:"name"`
 	Keys []string `json:"keys"`
+	// Source distinguishes editable local credential records from external
+	// vendor-managed session profiles. Empty means the provider's legacy
+	// editable store; "sso" means authentication/config is vendor-owned.
+	Source   string `json:"source,omitempty"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
 	// Active marks the provider's own currently-active/default entry (e.g.
 	// gcloud's active configuration). Only providers with a native "active"
 	// concept that can BLOCK an operation (currently: gcp's delete-refuses-
@@ -97,6 +114,20 @@ type Provider interface {
 	Parse(text string) Parsed
 	// Schema describes the provider's known fields for schema-driven UIs.
 	Schema() Schema
+}
+
+// ConditionalSaver is an optional optimistic-concurrency capability. The
+// implementation must compare and write while holding the same storage lock:
+//
+//   - expectAbsent=true succeeds only when name does not exist;
+//   - otherwise the connection must exist and its normalized fields must
+//     equal expectedFields.
+//
+// A failed precondition returns ErrConnectionConflict. This prevents a dirty
+// editor or an SSO batch refresh from overwriting an independent update made
+// after discovery.
+type ConditionalSaver interface {
+	SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error
 }
 
 // Activator is an optional capability: providers that have a native notion of

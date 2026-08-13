@@ -8,6 +8,68 @@ struct FastProcessResult {
     let standardError: Data
 }
 
+/// Thread-safe cancellation handle for a spawned core command. Every core
+/// invocation runs in its own process group, so cancelling an interactive
+/// cloud login terminates both the bundled core and the vendor CLI/browser
+/// helper it started. The delayed SIGKILL is guarded by the exact live pid;
+/// it can never target a later process that reused the numeric pid.
+final class FastProcessCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processGroup: pid_t?
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let group = processGroup
+        if let group { signal(group: group, signal: SIGTERM) }
+        lock.unlock()
+        guard let group else { return }
+        scheduleForcedTermination(of: group)
+    }
+
+    fileprivate func register(processGroup group: pid_t) {
+        lock.lock()
+        processGroup = group
+        let shouldCancel = cancelled
+        if shouldCancel { signal(group: group, signal: SIGTERM) }
+        lock.unlock()
+        if shouldCancel {
+            scheduleForcedTermination(of: group)
+        }
+    }
+
+    fileprivate func finish(processGroup group: pid_t) {
+        lock.lock()
+        if processGroup == group { processGroup = nil }
+        lock.unlock()
+    }
+
+    private func scheduleForcedTermination(of group: pid_t) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let stillRunning = self.cancelled && self.processGroup == group
+            if stillRunning { self.signal(group: group, signal: SIGKILL) }
+            self.lock.unlock()
+        }
+    }
+
+    private func signal(group: pid_t, signal: Int32) {
+        // Negative pid addresses the process group created by posix_spawn.
+        if Darwin.kill(-group, signal) == -1, errno != ESRCH {
+            // Cancellation is best-effort at this boundary. waitpid remains
+            // authoritative and will surface the actual termination result.
+        }
+    }
+}
+
 /// A small `posix_spawn` boundary for the bundled core. `Foundation.Process`
 /// adds tens of milliseconds to every otherwise 2–3 ms local command on
 /// macOS. This runner keeps the same process isolation, exact argv and
@@ -89,7 +151,8 @@ enum FastProcessRunner {
         executable: String,
         arguments: [String],
         input: Data?,
-        environment: [String: String]
+        environment: [String: String],
+        cancellation: FastProcessCancellation? = nil
     ) throws -> FastProcessResult {
         var pipes: [PipePair] = []
         var childWasSpawned = false
@@ -105,6 +168,7 @@ enum FastProcessRunner {
                 stdinPipe: pipes[0],
                 stdoutPipe: pipes[1],
                 stderrPipe: pipes[2],
+                cancellation: cancellation,
                 childWasSpawned: &childWasSpawned
             )
         } catch {
@@ -127,6 +191,7 @@ enum FastProcessRunner {
         stdinPipe: PipePair,
         stdoutPipe: PipePair,
         stderrPipe: PipePair,
+        cancellation: FastProcessCancellation?,
         childWasSpawned: inout Bool
     ) throws -> FastProcessResult {
         var actions: posix_spawn_file_actions_t? = nil
@@ -138,8 +203,12 @@ enum FastProcessRunner {
 
         // Close every unrelated descriptor in the child. The three explicit
         // dup2 actions below are the complete IPC surface.
+        try check(posix_spawnattr_setpgroup(&attributes, 0), operation: "create process group")
         try check(
-            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)),
+            posix_spawnattr_setflags(
+                &attributes,
+                Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP)
+            ),
             operation: "configure spawn descriptor policy"
         )
         try check(
@@ -184,6 +253,8 @@ enum FastProcessRunner {
             throw posixError(spawnCode, operation: "launch bundled core")
         }
         childWasSpawned = true
+        cancellation?.register(processGroup: pid)
+        defer { cancellation?.finish(processGroup: pid) }
 
         // Ownership of the opposite pipe ends now belongs to the child.
         Darwin.close(stdinPipe.read)

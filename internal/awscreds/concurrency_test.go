@@ -1,6 +1,7 @@
 package awscreds
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -50,6 +51,46 @@ func TestConcurrentSavesSerializeWithoutLostProfiles(t *testing.T) {
 	}
 	if len(profiles) != 2 {
 		t.Fatalf("concurrent saves lost a profile: %+v", profiles)
+	}
+}
+
+func TestConditionalSaveAllowsExactlyOneConcurrentUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials")
+	baseline := map[string]string{KeyRegion: "eu-west-1"}
+	if err := Save(path, "shared", baseline); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	for _, region := range []string{"us-east-1", "ap-southeast-1"} {
+		region := region
+		go func() {
+			<-start
+			done <- SaveIfUnchanged(path, "shared", map[string]string{KeyRegion: region}, baseline, false)
+		}()
+	}
+	close(start)
+
+	successes, conflicts := 0, 0
+	for range 2 {
+		switch err := <-done; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("conditional save returned unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want exactly one of each", successes, conflicts)
+	}
+	if err := SaveIfUnchanged(path, "new", baseline, nil, true); err != nil {
+		t.Fatalf("create with absent precondition: %v", err)
+	}
+	if err := SaveIfUnchanged(path, "new", baseline, nil, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second absent-precondition create error = %v, want ErrConflict", err)
 	}
 }
 

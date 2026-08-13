@@ -450,6 +450,64 @@ func TestListSkipsCorruptFolder(t *testing.T) {
 	}
 }
 
+func TestGetRejectsTraversalIDBeforeFilesystemAccess(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "profiles")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"id":"../outside","name":"escaped","version":4}`
+	if err := os.WriteFile(filepath.Join(outside, "profile.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Get(root, "../outside"); err == nil {
+		t.Fatal("Get accepted a traversal profile id")
+	}
+	if err := Delete(root, "../outside"); err == nil {
+		t.Fatal("Delete accepted a traversal profile id")
+	}
+}
+
+func TestGetRejectsTamperedPersistedEnvironment(t *testing.T) {
+	for _, env := range []EnvVar{
+		{Key: "DYLD_INSERT_LIBRARIES", Value: "/tmp/evil.dylib"},
+		{Key: "AWS_SECRET_ACCESS_KEY", Value: "must-not-load"},
+	} {
+		t.Run(env.Key, func(t *testing.T) {
+			root := tmpRoot(t)
+			created := mustCreate(t, root, Profile{Name: "safe"})
+			created.EnvVars = []EnvVar{env}
+			writeRawProfile(t, root, created)
+
+			if _, err := Get(root, created.ID); err == nil {
+				t.Fatalf("Get accepted tampered environment key %q", env.Key)
+			}
+		})
+	}
+}
+
+func TestGetRejectsOversizedProfileBeforeJSONDecode(t *testing.T) {
+	root := tmpRoot(t)
+	id := strings.Repeat("a", 32)
+	dir := filepath.Join(root, id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "profile.json"),
+		[]byte(strings.Repeat(" ", maxProfileFileBytes+1)),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Get(root, id); err == nil {
+		t.Fatal("Get accepted an oversized profile file")
+	}
+}
+
 func TestListSkipsMismatchedID(t *testing.T) {
 	root := tmpRoot(t)
 	mustCreate(t, root, Profile{Name: "good"})
@@ -556,6 +614,30 @@ func TestValidationAcceptsNonSecretEnvVar(t *testing.T) {
 	root := tmpRoot(t)
 	if _, err := Create(root, Profile{Name: "ok", EnvVars: []EnvVar{{Key: "AWS_REGION", Value: "us-east-1"}}}); err != nil {
 		t.Fatalf("expected AWS_REGION to be accepted: %v", err)
+	}
+}
+
+func TestValidationRejectsInvalidAndPlatformOwnedEnvironment(t *testing.T) {
+	for _, key := range []string{
+		"A=B", "BAD KEY", "ÜNICODE", "HOME", "TMPDIR",
+		"EZCLOUD_DATA_DIR", "EZCLOUD_CONFIG_DIR", "KERVIK_DATA_DIR",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := validateProfile(Profile{Name: "safe", EnvVars: []EnvVar{{Key: key, Value: "x"}}})
+			if err == nil {
+				t.Fatalf("accepted unsafe environment key %q", key)
+			}
+		})
+	}
+}
+
+func TestValidationRejectsOversizedEnvironmentValue(t *testing.T) {
+	_, err := validateProfile(Profile{
+		Name:    "safe",
+		EnvVars: []EnvVar{{Key: "AWS_CONFIG_FILE", Value: strings.Repeat("x", maxEnvValueBytes+1)}},
+	})
+	if err == nil {
+		t.Fatal("accepted oversized environment value")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,13 @@ import (
 
 // nowFunc is swappable in tests that assert backup naming.
 var nowFunc = time.Now
+
+const maxConfigBytes = 4 << 20
+
+// writeBatchAtomic is replaceable only by package tests that prove rollback
+// after a later row's filesystem failure. Production always points at the
+// shared atomic writer.
+var writeBatchAtomic = inifile.WriteAtomic
 
 const (
 	KeyAccount     = "core.account"
@@ -53,6 +61,20 @@ type Parsed struct {
 	Notes       []string          `json:"notes,omitempty"`
 }
 
+// ConditionalSave is one row in an optimistic batch transaction. Every row's
+// precondition is validated while all destination path locks are held; a stale
+// row aborts the batch before any configuration is written.
+type ConditionalSave struct {
+	Name           string
+	Fields         map[string]string
+	ExpectedFields map[string]string
+	ExpectAbsent   bool
+}
+
+// ErrConflict is returned when a conditional save's editor baseline no longer
+// matches the configuration currently on disk.
+var ErrConflict = errors.New("gcloud configuration changed since it was loaded")
+
 // DefaultPath returns the gcloud config root: $CLOUDSDK_CONFIG if set, else
 // ~/.config/gcloud — the same resolution the gcloud CLI uses.
 func DefaultPath() (string, error) {
@@ -66,8 +88,12 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".config", "gcloud"), nil
 }
 
-func configFile(root, name string) string {
-	return filepath.Join(root, "configurations", "config_"+name)
+func configFile(root, name string) (string, error) {
+	name, err := validateConfigName(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "configurations", "config_"+name), nil
 }
 
 func activeConfigFile(root string) string {
@@ -126,9 +152,10 @@ func List(root string) ([]ProfileSummary, error) {
 }
 
 func Get(root, name string) (Profile, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return Profile{}, errors.New("configuration name is required")
+	var err error
+	name, err = validateConfigName(name)
+	if err != nil {
+		return Profile{}, err
 	}
 	fields, err := readConfig(root, name)
 	if err != nil {
@@ -138,14 +165,36 @@ func Get(root, name string) (Profile, error) {
 }
 
 func readConfig(root, name string) (map[string]string, error) {
-	model, err := inifile.Read(configFile(root, name))
+	path, err := configFile(root, name)
 	if err != nil {
 		return nil, err
 	}
+	model, err := inifile.ReadLimited(path, maxConfigBytes)
+	if err != nil {
+		return nil, err
+	}
+	return fieldsFromModel(model)
+}
+
+func fieldsFromModel(model inifile.Model) (map[string]string, error) {
 	fields := map[string]string{}
+	sections := map[string]bool{}
 	for _, sec := range model.Sections {
-		for key, value := range sec.Fields() {
-			fields[strings.ToLower(sec.Name)+"."+key] = value
+		sectionName := strings.ToLower(strings.TrimSpace(sec.Name))
+		if sections[sectionName] {
+			return nil, fmt.Errorf("gcloud configuration contains duplicate section %q", sec.Name)
+		}
+		sections[sectionName] = true
+		sectionFields, err := sec.StrictFields()
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range sectionFields {
+			canonical := sectionName + "." + key
+			if _, duplicate := fields[canonical]; duplicate {
+				return nil, fmt.Errorf("gcloud configuration contains duplicate property %q", canonical)
+			}
+			fields[canonical] = value
 		}
 	}
 	return fields, nil
@@ -155,31 +204,156 @@ func readConfig(root, name string) (map[string]string, error) {
 // and hyphens, starting with a letter.
 var nameRe = regexp.MustCompile(`^[a-z][-a-z0-9]*$`)
 
+func validateConfigName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if !nameRe.MatchString(name) {
+		return "", fmt.Errorf("configuration name %q must match %s (lowercase letters, digits, hyphens)", name, nameRe)
+	}
+	return name, nil
+}
+
 // Save writes the named configuration, preserving unknown properties and
 // comments already in the file. Keys must be "section.property"; a bare key
 // is treated as core.<key>.
-func Save(root, name string, fields map[string]string) (resultErr error) {
-	name = strings.TrimSpace(name)
-	if !nameRe.MatchString(name) {
-		return fmt.Errorf("configuration name %q must match %s (lowercase letters, digits, hyphens)", name, nameRe)
-	}
+func Save(root, name string, fields map[string]string) error {
+	return save(root, name, fields, nil, false, false)
+}
 
-	bySection := map[string]map[string]string{}
-	for key, value := range fields {
-		sec, prop := splitKey(key)
-		if sec == "" {
-			continue
-		}
-		if err := inifile.ValidateField(prop, strings.TrimSpace(value)); err != nil {
+// SaveIfUnchanged compares and writes while holding the same configuration
+// file lock, preventing stale editors and batch syncs from losing updates.
+func SaveIfUnchanged(root, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	return save(root, name, fields, expectedFields, expectAbsent, true)
+}
+
+// SaveBatchIfUnchanged applies a set of configuration updates as one
+// optimistic transaction with respect to conflicts: it locks every target in
+// deterministic order and validates every baseline before the first write. If
+// a later filesystem write fails, previously written rows are restored before
+// the error returns; callers still refresh in case that rollback itself fails.
+func SaveBatchIfUnchanged(root string, changes []ConditionalSave) (resultErr error) {
+	if len(changes) == 0 {
+		return nil
+	}
+	type preparedChange struct {
+		name         string
+		path         string
+		bySection    map[string]map[string]string
+		expected     map[string]string
+		expectAbsent bool
+		model        inifile.Model
+		existed      bool
+		original     []byte
+	}
+	prepared := make([]preparedChange, 0, len(changes))
+	paths := make([]string, 0, len(changes))
+	seenNames := make(map[string]struct{}, len(changes))
+	for _, change := range changes {
+		name, err := validateConfigName(change.Name)
+		if err != nil {
 			return err
 		}
-		if bySection[sec] == nil {
-			bySection[sec] = map[string]string{}
+		if _, duplicate := seenNames[name]; duplicate {
+			return fmt.Errorf("duplicate gcloud configuration %q in batch", name)
 		}
-		bySection[sec][prop] = strings.TrimSpace(value)
+		seenNames[name] = struct{}{}
+		bySection, _, err := normalizeAndGroupFields(change.Fields)
+		if err != nil {
+			return err
+		}
+		_, expected, err := normalizeAndGroupFields(change.ExpectedFields)
+		if err != nil {
+			return fmt.Errorf("validate expected gcloud fields: %w", err)
+		}
+		path, err := configFile(root, name)
+		if err != nil {
+			return err
+		}
+		prepared = append(prepared, preparedChange{
+			name: name, path: path, bySection: bySection,
+			expected: expected, expectAbsent: change.ExpectAbsent,
+		})
+		paths = append(paths, path)
+	}
+	sort.Slice(prepared, func(i, j int) bool { return prepared[i].path < prepared[j].path })
+
+	release, err := pathlock.Acquire(paths...)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, release()) }()
+
+	// Preflight every row under the complete lock set before any write.
+	for i := range prepared {
+		model, err := inifile.ReadLimited(prepared[i].path, maxConfigBytes)
+		if err != nil {
+			return err
+		}
+		prepared[i].model = model
+		currentFields, err := fieldsFromModel(model)
+		if err != nil {
+			return err
+		}
+		_, statErr := os.Stat(prepared[i].path)
+		exists := statErr == nil
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if prepared[i].expectAbsent {
+			if exists {
+				return ErrConflict
+			}
+		} else if !exists || !maps.Equal(currentFields, prepared[i].expected) {
+			return ErrConflict
+		}
+		prepared[i].existed = exists
+		if exists {
+			prepared[i].original = inifile.Render(model)
+		}
 	}
 
-	path := configFile(root, name)
+	written := make([]int, 0, len(prepared))
+	for i := range prepared {
+		applyFieldsToModel(&prepared[i].model, prepared[i].bySection)
+		if err := writeBatchAtomic(prepared[i].path, prepared[i].model, true); err != nil {
+			var rollbackErr error
+			for j := len(written) - 1; j >= 0; j-- {
+				previous := &prepared[written[j]]
+				if previous.existed {
+					rollbackErr = errors.Join(rollbackErr, inifile.WriteFileAtomic(previous.path, previous.original, false))
+				} else if removeErr := os.Remove(previous.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					rollbackErr = errors.Join(rollbackErr, removeErr)
+				}
+			}
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rollback a partially written gcloud sync: %w", rollbackErr))
+			}
+			return err
+		}
+		written = append(written, i)
+	}
+	return nil
+}
+
+func save(root, name string, fields, expectedFields map[string]string, expectAbsent, conditional bool) (resultErr error) {
+	var err error
+	name, err = validateConfigName(name)
+	if err != nil {
+		return err
+	}
+
+	bySection, _, err := normalizeAndGroupFields(fields)
+	if err != nil {
+		return err
+	}
+	_, expected, err := normalizeAndGroupFields(expectedFields)
+	if err != nil && conditional {
+		return fmt.Errorf("validate expected gcloud fields: %w", err)
+	}
+
+	path, err := configFile(root, name)
+	if err != nil {
+		return err
+	}
 	release, err := pathlock.Acquire(path)
 	if err != nil {
 		return err
@@ -187,11 +361,34 @@ func Save(root, name string, fields map[string]string) (resultErr error) {
 	defer func() {
 		resultErr = errors.Join(resultErr, release())
 	}()
-	model, err := inifile.Read(path)
+	model, err := inifile.ReadLimited(path, maxConfigBytes)
 	if err != nil {
 		return err
 	}
+	currentFields, err := fieldsFromModel(model)
+	if err != nil {
+		return err
+	}
+	if conditional {
+		_, statErr := os.Stat(path)
+		exists := statErr == nil
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if expectAbsent {
+			if exists {
+				return ErrConflict
+			}
+		} else if !exists || !maps.Equal(currentFields, expected) {
+			return ErrConflict
+		}
+	}
 
+	applyFieldsToModel(&model, bySection)
+	return inifile.WriteAtomic(path, model, true)
+}
+
+func applyFieldsToModel(model *inifile.Model, bySection map[string]map[string]string) {
 	// Deterministic section order for new sections: core first, rest sorted.
 	names := make([]string, 0, len(bySection))
 	for sec := range bySection {
@@ -225,7 +422,30 @@ func Save(root, name string, fields map[string]string) (resultErr error) {
 		}
 		model.Sections[idx].ApplyFields(bySection[sec])
 	}
-	return inifile.WriteAtomic(path, model, true)
+}
+
+func normalizeAndGroupFields(fields map[string]string) (map[string]map[string]string, map[string]string, error) {
+	bySection := map[string]map[string]string{}
+	normalized := map[string]string{}
+	for key, value := range fields {
+		sec, prop := splitKey(key)
+		if sec == "" {
+			return nil, nil, fmt.Errorf("invalid gcloud property key %q", key)
+		}
+		if err := inifile.ValidateField(sec, ""); err != nil {
+			return nil, nil, fmt.Errorf("invalid gcloud property section %q: %w", sec, err)
+		}
+		value = strings.TrimSpace(value)
+		if err := inifile.ValidateField(prop, value); err != nil {
+			return nil, nil, fmt.Errorf("invalid gcloud property %q: %w", prop, err)
+		}
+		if bySection[sec] == nil {
+			bySection[sec] = map[string]string{}
+		}
+		bySection[sec][prop] = value
+		normalized[sec+"."+prop] = value
+	}
+	return bySection, normalized, nil
 }
 
 // splitKey turns "compute.region" into ("compute", "region") and a bare
@@ -249,11 +469,15 @@ func splitKey(key string) (string, string) {
 // Deleting the active configuration is refused, matching gcloud's behavior
 // — switch first, then delete.
 func Delete(root, name string) (resultErr error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return errors.New("configuration name is required")
+	var err error
+	name, err = validateConfigName(name)
+	if err != nil {
+		return err
 	}
-	path := configFile(root, name)
+	path, err := configFile(root, name)
+	if err != nil {
+		return err
+	}
 	release, err := pathlock.Acquire(activeConfigFile(root), path)
 	if err != nil {
 		return err
@@ -282,11 +506,15 @@ func Delete(root, name string) (resultErr error) {
 // <root>/active_config — exactly what `gcloud config configurations
 // activate` does.
 func Activate(root, name string) (resultErr error) {
-	name = strings.TrimSpace(name)
-	if !nameRe.MatchString(name) {
-		return fmt.Errorf("configuration name %q is not a valid gcloud configuration name", name)
+	var err error
+	name, err = validateConfigName(name)
+	if err != nil {
+		return err
 	}
-	path := configFile(root, name)
+	path, err := configFile(root, name)
+	if err != nil {
+		return err
+	}
 	release, err := pathlock.Acquire(activeConfigFile(root), path)
 	if err != nil {
 		return err

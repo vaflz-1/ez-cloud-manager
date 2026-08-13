@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,7 +29,9 @@ type listResponse struct {
 }
 
 type saveRequest struct {
-	Fields map[string]string `json:"fields"`
+	Fields         map[string]string `json:"fields"`
+	ExpectedFields map[string]string `json:"expectedFields,omitempty"`
+	ExpectAbsent   bool              `json:"expectAbsent,omitempty"`
 }
 
 type okResponse struct {
@@ -43,6 +46,11 @@ type providerInfo struct {
 	// action for this provider's profiles.
 	CanActivate   bool   `json:"canActivate"`
 	ActivateLabel string `json:"activateLabel,omitempty"`
+	// CanAuthenticate is derived from the embedded Connector capability
+	// manifest. Native clients never hardcode which providers support an
+	// explicit browser/device sign-in flow.
+	CanAuthenticate bool `json:"canAuthenticate"`
+	CanSync         bool `json:"canSync"`
 }
 
 // maxStdinBytes bounds how much we read from stdin (save JSON / parse blob).
@@ -127,14 +135,27 @@ func profileCommand(cmd string, args []string) {
 	case "save":
 		name := requireProfile()
 		var req saveRequest
-		if err := json.NewDecoder(io.LimitReader(os.Stdin, maxStdinBytes)).Decode(&req); err != nil {
+		if err := decodeLimitedJSON(os.Stdin, &req); err != nil {
 			fail(fmt.Errorf("read save json: %w", err))
 		}
-		old, _ := prov.Get(path, name)
-		if err := prov.Save(path, name, req.Fields); err != nil {
+		oldFields := req.ExpectedFields
+		if oldFields == nil {
+			old, _ := prov.Get(path, name)
+			oldFields = old.Fields
+		}
+		if req.ExpectedFields != nil || req.ExpectAbsent {
+			conditional, ok := prov.(provider.ConditionalSaver)
+			if !ok {
+				fail(fmt.Errorf("provider %q does not support conditional saves", prov.ID()))
+			}
+			err = conditional.SaveIfUnchanged(path, name, req.Fields, req.ExpectedFields, req.ExpectAbsent)
+		} else {
+			err = prov.Save(path, name, req.Fields)
+		}
+		if err != nil {
 			fail(err)
 		}
-		auditRecord("save", prov.ID(), name, old.Fields, req.Fields)
+		auditRecord("save", prov.ID(), name, oldFields, req.Fields)
 		writeJSON(okResponse{OK: true})
 	case "delete":
 		name := requireProfile()
@@ -179,6 +200,22 @@ func profileCommand(cmd string, args []string) {
 	}
 }
 
+func decodeLimitedJSON(reader io.Reader, destination any) error {
+	decoder := json.NewDecoder(io.LimitReader(reader, maxStdinBytes+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
 func writeJSON(value any) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -196,6 +233,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
 	  ezcloud app bootstrap
 	  ezcloud connections list
+	  ezcloud connections auth discover --provider aws|gcp [--principal GCP_ACCOUNT]
+	  ezcloud connections auth login    --provider aws|gcp < login.json
+	  ezcloud connections auth apply    --provider aws|gcp < apply.json
 	  ezcloud providers
   ezcloud list     [--provider ID]
   ezcloud get      [--provider ID] --profile NAME

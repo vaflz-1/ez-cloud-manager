@@ -30,6 +30,22 @@ func registeredProviderInfos() ([]providerInfo, error) {
 			DisplayName: manifest.Name,
 			Icon:        manifest.Icon,
 		}
+		loginOperation := map[string]string{
+			"aws": "aws.sso.login",
+			"gcp": "gcp.identity.login",
+		}[manifest.ID]
+		syncOperation := map[string]string{
+			"aws": "aws.sso.profiles.sync",
+			"gcp": "gcp.configurations.sync",
+		}[manifest.ID]
+		for _, operation := range manifest.Provides.Operations {
+			if operation == loginOperation {
+				info.CanAuthenticate = true
+			}
+			if operation == syncOperation {
+				info.CanSync = true
+			}
+		}
 		if activator, ok := backend.(provider.Activator); ok {
 			info.CanActivate = true
 			info.ActivateLabel = activator.ActivateLabel()

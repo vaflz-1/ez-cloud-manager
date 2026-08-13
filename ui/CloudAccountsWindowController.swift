@@ -63,6 +63,10 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
     var activateButton: NSButton!
     var exportButton: NSPopUpButton!
     var profileSearchField: NSSearchField!
+    /// Lazily-created connector-owned browser login / synchronization sheet.
+    /// Kept per Connections window so two Workspaces never share auth review
+    /// state or apply callbacks.
+    var connectionSyncController: ConnectionAuthSyncSheetController?
 
     // MARK: Test Connection (CloudAccountsWindowController+Diagnostics.swift)
 
@@ -159,13 +163,34 @@ final class CloudAccountsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        confirmDiscardConnectionChanges()
+        if connectionSyncController?.isApplying == true {
+            connectionSyncController?.requestCloseAfterApply(closeParent: true)
+            setStatus("Finishing connection sync before closing")
+            return false
+        }
+        return confirmDiscardConnectionChanges()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        connectionSyncController?.dismissAndCancel()
+        if connectionSyncController?.isApplying != true {
+            connectionSyncController = nil
+        }
     }
 
     /// Rebinds the system Connections surface to a fresh snapshot of the same
     /// workspace when its execution environment is unchanged. Environment
     /// changes close the controller instead, so no draft crosses cloud roots.
     func updateOwningProfile(_ updated: Profile) {
+        let syncContextChanged = profile.name != updated.name
+            || profile.envVars != updated.envVars
+            || profile.cloudAccountsSettings != updated.cloudAccountsSettings
+        if syncContextChanged {
+            connectionSyncController?.dismissAndCancel()
+            if connectionSyncController?.isApplying != true {
+                connectionSyncController = nil
+            }
+        }
         profile = updated
         window?.title = Product.toolTitle("Connections", workspace: updated.name)
         rebuildSidebarRows()
@@ -206,5 +231,10 @@ enum SidebarRow {
 struct ConnectionEditorBaseline: Equatable {
     let provider: String
     let name: String
+    /// Expanded editor rows (including empty recommended fields), used only
+    /// for dirty-state comparison.
     let fields: [String: String]
+    /// Exact storage snapshot used as the next optimistic-save precondition.
+    /// This must not contain the editor's synthetic empty recommendation rows.
+    let persistedFields: [String: String]
 }

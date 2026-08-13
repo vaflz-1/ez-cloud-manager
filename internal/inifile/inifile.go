@@ -10,7 +10,6 @@
 package inifile
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -53,15 +52,36 @@ type Model struct {
 	Sections []Section
 }
 
+const DefaultMaxBytes int64 = 4 << 20
+
 // Read loads path into a Model. A missing file is an empty model, so callers
 // can treat "no file yet" and "empty file" identically.
 func Read(path string) (Model, error) {
-	data, err := os.ReadFile(path)
+	return ReadLimited(path, DefaultMaxBytes)
+}
+
+// ReadLimited loads at most maxBytes from path. It is intended for
+// externally-managed provider files that may be replaced independently of
+// this process; reading through one open descriptor makes the size check and
+// parse a single snapshot instead of a racy Stat-then-Read pair.
+func ReadLimited(path string, maxBytes int64) (Model, error) {
+	if maxBytes <= 0 {
+		return Model{}, fmt.Errorf("read limit must be positive")
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Model{}, nil
 		}
 		return Model{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return Model{}, err
+	}
+	if int64(len(data)) > maxBytes {
+		return Model{}, fmt.Errorf("INI file exceeds the %d-byte safety limit", maxBytes)
 	}
 	return ReadBytes(data), nil
 }
@@ -69,10 +89,20 @@ func Read(path string) (Model, error) {
 // ReadBytes parses raw file content into a Model.
 func ReadBytes(data []byte) Model {
 	var model Model
-	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var current *Section
-	for scanner.Scan() {
-		raw := scanner.Text()
+	// bufio.Scanner silently stops at its 64 KiB token limit unless callers
+	// explicitly inspect Err. Provider configuration values can legitimately be
+	// longer than that, and returning a partial Model is dangerous: the next
+	// Save would atomically replace the complete file with the truncated model.
+	// Split physical lines directly instead. This keeps ReadBytes' existing
+	// no-error API while removing the token ceiling entirely.
+	for len(data) > 0 {
+		lineBytes, rest, _ := bytes.Cut(data, []byte{'\n'})
+		data = rest
+		if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\r' {
+			lineBytes = lineBytes[:len(lineBytes)-1]
+		}
+		raw := string(lineBytes)
 		trimmed := strings.TrimSpace(raw)
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			name := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
@@ -138,6 +168,24 @@ func (s Section) Fields() map[string]string {
 		}
 	}
 	return fields
+}
+
+// StrictFields is Fields with duplicate-key detection. Externally managed
+// identity/configuration files must use this form before security decisions or
+// mutation: last-value-wins parsing combined with first-value updates creates
+// an ambiguous identity that cannot be synchronized safely.
+func (s Section) StrictFields() (map[string]string, error) {
+	fields := map[string]string{}
+	for _, line := range s.Lines {
+		if line.Kind != LineKV {
+			continue
+		}
+		if _, duplicate := fields[line.Key]; duplicate {
+			return nil, fmt.Errorf("INI section %q contains duplicate property %q", s.Name, line.Key)
+		}
+		fields[line.Key] = line.Value
+	}
+	return fields, nil
 }
 
 // ApplyFields updates the section in place: existing keys are rewritten (an

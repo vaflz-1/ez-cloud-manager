@@ -11,8 +11,21 @@ extension CloudAccountsWindowController {
         connectionSaveGeneration += 1
     }
 
-    func setEditorBaseline(provider: String, name: String, fields: [String: String]) {
-        editorBaseline = ConnectionEditorBaseline(provider: provider, name: name, fields: fields)
+    func setEditorBaseline(
+        provider: String,
+        name: String,
+        fields: [String: String],
+        persistedFields: [String: String]? = nil
+    ) {
+        let persisted = persistedFields ?? fields.filter {
+            !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        editorBaseline = ConnectionEditorBaseline(
+            provider: provider,
+            name: name,
+            fields: fields,
+            persistedFields: persisted
+        )
     }
 
     func hasUnsavedConnectionChanges() -> Bool {
@@ -110,7 +123,14 @@ extension CloudAccountsWindowController {
         let preserveDraft = hasUnsavedConnectionChanges()
         let snapshots = Dictionary(uniqueKeysWithValues: response.providers.map { ($0.provider, $0) })
         let infos = catalog.providers.isEmpty
-            ? [ProviderInfo(id: "aws", displayName: "AWS", canActivate: false, activateLabel: nil)]
+            ? [ProviderInfo(
+                id: "aws",
+                displayName: "AWS",
+                canActivate: false,
+                activateLabel: nil,
+                canAuthenticate: false,
+                canSync: false
+            )]
             : catalog.providers
         var failures: [String] = []
         for info in infos {
@@ -229,6 +249,15 @@ extension CloudAccountsWindowController {
         (profilesByProvider[provider] ?? []).contains { $0.name == name }
     }
 
+    func profileSummary(_ name: String?, provider: String) -> ProfileSummary? {
+        guard let name else { return nil }
+        return profilesByProvider[provider]?.first { $0.name == name }
+    }
+
+    func selectedConnectionIsReadOnly() -> Bool {
+        profileSummary(selectedProfileName, provider: selectedProvider)?.isReadOnly ?? false
+    }
+
     func loadProfile(provider: String, name: String) {
         beginEditorContextChange()
         let generation = profileLoadGeneration
@@ -258,7 +287,12 @@ extension CloudAccountsWindowController {
             pasteView.string = ""
             lastAutoParsedPaste = ""
             fieldRows = rows(from: profileResponse.fields, includeEmptyRecommended: true)
-            setEditorBaseline(provider: provider, name: profileResponse.name, fields: fieldsDictionary())
+            setEditorBaseline(
+                provider: provider,
+                name: profileResponse.name,
+                fields: fieldsDictionary(),
+                persistedFields: profileResponse.fields
+            )
             resetFieldCollapse()
             reloadFieldsTable()
             syncProviderPopup()
@@ -444,7 +478,9 @@ extension CloudAccountsWindowController {
     func updateActivateButton() {
         guard let button = activateButton else { return }
         let info = catalog.providerInfo(selectedProvider)
-        let visible = (info?.canActivate ?? false) && selectedProfileName != nil
+        let visible = (info?.canActivate ?? false)
+            && selectedProfileName != nil
+            && !selectedConnectionIsReadOnly()
         button.isHidden = !visible
         button.toolTip = info?.activateLabel
     }
@@ -482,6 +518,16 @@ extension CloudAccountsWindowController {
 
     func updateProfileMode() {
         let name = profileNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let readOnly = selectedConnectionIsReadOnly()
+        profileNameField.isEditable = !readOnly
+        pasteView.isEditable = !readOnly
+        fieldsTable.isEnabled = !readOnly
+        if readOnly {
+            profileModeLabel.stringValue = "Managed by the provider CLI"
+            saveButton.title = "Managed Externally"
+            saveButton.isEnabled = false
+            return
+        }
         if name.isEmpty && selectedProfileName == nil && fieldRows.isEmpty {
             profileModeLabel.stringValue = "No connection selected"
             saveButton.title = "Create Connection"

@@ -5,10 +5,10 @@ and self-hosted work. A small host provides isolated Workspaces, trusted
 Connections and an Add-on surface; operational workflows stay outside the
 core and can grow without turning the application into a dashboard monolith.
 
-Kervik is deliberately boring at the trust boundary: no hosted
-sync, no SaaS login, no telemetry, no surprise network calls. Network is used
-only for explicit Connector actions such as Test Connection or EC2 Launch
-Templates, through your own vendor CLIs and credentials.
+Kervik is deliberately boring at the trust boundary: no hosted Kervik account,
+no cloud-side profile store, no telemetry, and no surprise network calls.
+Network is used only for explicit Connector actions such as Sign In / Sync,
+Test Connection or EC2 Launch Templates, through the official vendor CLIs.
 
 Working-name compatibility is deliberate: the CLI remains `ezcloud`, exported
 Workspaces remain `.ezprofile`, and existing bundle/data identifiers stay
@@ -21,8 +21,8 @@ If it saves you time: [support it on Ko-fi ♥](https://ko-fi.com/vaflz).
 
 | Connector | Local storage (vendor-CLI compatible) | Connections and capabilities |
 |---|---|---|
-| AWS | `~/.aws/credentials` | AWS profile-backed Connection editor, SSO fields, EC2 Launch Templates, "copy to [default]" switch |
-| Google Cloud | `~/.config/gcloud/configurations/config_*` | real gcloud named configurations, one-click activate (`active_config`) |
+| AWS | `~/.aws/credentials` + read-only discovery from `~/.aws/config` | key-backed Connection editor, IAM Identity Center sign-in/sync, EC2 Launch Templates |
+| Google Cloud | `~/.config/gcloud/configurations/config_*` | browser sign-in, project discovery, reviewed named-configuration sync, one-click activate |
 | Azure | `~/.config/ezcloud/azure_profiles.ini` (0600) | named Connections the az CLI never had; paste `az ad sp create-for-rbac` JSON directly |
 
 Connector knowledge (field labels, secret masking, environment names and
@@ -41,6 +41,10 @@ and external Connector runtime are introduced.
   keys are deliberately never imported — keys stay in files.
 - **Connections** — manage AWS, Google Cloud and Azure contexts through
   connector-owned local stores; add-ons never need raw credentials.
+- **Sign In / Sync** — on an explicit user action, AWS IAM Identity Center
+  and Google Cloud open the system browser through their official CLIs. A
+  token-free Add/Update/Unchanged preview appears before selected Connections
+  are linked or written; OAuth/SSO tokens never cross the CLI boundary.
 - **Import / Export** — import any config file; export as shell `export`
   lines, `.env`, Connector-native INI, or JSON. Clipboard exports use the
   concealed pasteboard type (clipboard managers won't log them); file
@@ -79,6 +83,7 @@ and external Connector runtime are introduced.
   map in `platform/README.md`)
 - [Product/interaction contract](docs/PRODUCT_DNA.md)
 - [Target Add-on/Connector architecture](docs/PLATFORM.md)
+- [Connection sign-in and token boundary](docs/CONNECTION_AUTH.md)
 
 The UI talks to the CLI over JSON; the CLI is fully usable standalone:
 
@@ -89,6 +94,7 @@ ezcloud export --provider azure --profile client-a --format env
 pbpaste | ezcloud parse --provider azure
 ezcloud lt templates --profile prod --region eu-west-1
 ezcloud audit --limit 20
+ezcloud connections auth discover --provider aws
 ```
 
 ## Build / install
@@ -104,6 +110,10 @@ go test ./...
   the point); the app's own stores are 0600 under `~/.config/ezcloud/`.
 - Nothing is logged or transmitted: no analytics, no crash reporting, and
   the audit log records key names only.
+- AWS and Google remain the session owners. Kervik does not read AWS SSO
+  caches, gcloud credential databases, device codes, access tokens or refresh
+  tokens; the synchronization wire contains only profile/project metadata and
+  hashed snapshot identifiers.
 - Launch Template data (which can embed user-data secrets) is passed to the
   AWS CLI via a 0600 temp file, never argv.
 - Destructive actions (delete Connection, delete template version, overwrite

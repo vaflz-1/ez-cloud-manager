@@ -13,10 +13,13 @@ final class CredentialsService {
         /// concurrency failure. UI code must not infer conflict behavior from
         /// an arbitrary alert string.
         case profileCoreConflict(String)
+        case connectionConflict(String)
 
         var errorDescription: String? {
             switch self {
-            case .toolFailed(let message), .profileCoreConflict(let message):
+            case .toolFailed(let message),
+                 .profileCoreConflict(let message),
+                 .connectionConflict(let message):
                 return message
             }
         }
@@ -29,17 +32,22 @@ final class CredentialsService {
     private var addonCatalogSnapshot: [PluginDescriptor]?
     private var profileSnapshotRevision: UInt64 = 0
 
-    init() {
-        if let resource = Bundle.main.path(forResource: "ezcloud", ofType: nil) {
+    init(toolPath explicitToolPath: String? = nil) {
+        if let explicitToolPath {
+            // Dependency injection is the only development override. Keeping
+            // source-relative fallbacks out of production also prevents the
+            // compiler from embedding a developer's absolute checkout path in
+            // the public Mach-O binary.
+            toolPath = explicitToolPath
+        } else if let resource = Bundle.main.path(forResource: "ezcloud", ofType: nil) {
             toolPath = resource
         } else {
-            // Dev fallback: resolve dist/ezcloud relative to this source file's
-            // location (ui/CredentialsService.swift → project root), so the tool
-            // path is not tied to any one developer's home directory.
-            let projectRoot = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()   // ui/
-                .deletingLastPathComponent()   // project root
-            toolPath = projectRoot.appendingPathComponent("dist/ezcloud").path
+            // A production bundle without its signed core is corrupt. Point at
+            // the expected absolute resource location so posix_spawn returns a
+            // precise ENOENT error instead of searching PATH or guessing a
+            // developer-specific checkout.
+            let resources = Bundle.main.resourceURL ?? URL(fileURLWithPath: "/")
+            toolPath = resources.appendingPathComponent("ezcloud").path
         }
     }
 
@@ -213,8 +221,19 @@ final class CredentialsService {
         _ = try run(["delete", "--provider", provider, "--profile", name], input: nil, extraEnv: extraEnv)
     }
 
-    func save(provider: String, _ name: String, fields: [String: String], extraEnv: [String: String] = [:]) throws {
-        let payload = try JSONEncoder().encode(SaveRequest(fields: fields))
+    func save(
+        provider: String,
+        _ name: String,
+        fields: [String: String],
+        expectedFields: [String: String]? = nil,
+        expectAbsent: Bool = false,
+        extraEnv: [String: String] = [:]
+    ) throws {
+        let payload = try JSONEncoder().encode(SaveRequest(
+            fields: fields,
+            expectedFields: expectedFields,
+            expectAbsent: expectAbsent
+        ))
         _ = try run(["save", "--provider", provider, "--profile", name], inputData: payload, extraEnv: extraEnv)
     }
 
@@ -243,16 +262,32 @@ final class CredentialsService {
         try JSONDecoder().decode(T.self, from: data)
     }
 
-    func run(_ args: [String], input: String?, extraEnv: [String: String] = [:]) throws -> Data {
-        try run(args, inputData: input?.data(using: .utf8), extraEnv: extraEnv)
+    func run(
+        _ args: [String],
+        input: String?,
+        extraEnv: [String: String] = [:],
+        cancellation: FastProcessCancellation? = nil
+    ) throws -> Data {
+        try run(
+            args,
+            inputData: input?.data(using: .utf8),
+            extraEnv: extraEnv,
+            cancellation: cancellation
+        )
     }
 
-    func run(_ args: [String], inputData: Data?, extraEnv: [String: String] = [:]) throws -> Data {
+    func run(
+        _ args: [String],
+        inputData: Data?,
+        extraEnv: [String: String] = [:],
+        cancellation: FastProcessCancellation? = nil
+    ) throws -> Data {
         let result = try FastProcessRunner.run(
             executable: toolPath,
             arguments: args,
             input: inputData,
-            environment: Self.childEnvironment(extraEnv: extraEnv)
+            environment: Self.childEnvironment(extraEnv: extraEnv),
+            cancellation: cancellation
         )
         if result.terminationStatus != 0 {
             let data = result.standardOutput
@@ -268,6 +303,9 @@ final class CredentialsService {
                 }
                 ?? fallback
             let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized.contains("EZCLOUD_CONNECTION_CONFLICT") {
+                throw ServiceError.connectionConflict(normalized)
+            }
             if normalized.contains("profile core changed since draft was loaded") {
                 throw ServiceError.profileCoreConflict(normalized)
             }
@@ -286,16 +324,26 @@ final class CredentialsService {
         }
     }
 
-    /// Environment for the child CLI. Inherits the caller's environment (so
-    /// AWS_SHARED_CREDENTIALS_FILE and the real HOME keep working for whichever
-    /// user is running the app), then layers the owning window's profile env
-    /// vars on top, then pins a safe, minimal PATH plus the Homebrew locations
-    /// where the aws CLI is typically installed. Profiles can no longer store
-    /// PATH (or any hijack var — internal/profile/validate.go hard-rejects them
-    /// at Create/Save/Import), so pinning PATH last here is defense-in-depth
-    /// for vendor-CLI discovery, not the primary guard.
+    /// Environment for the child CLI. The app must not forward its entire
+    /// ambient environment: when launched from a terminal that can include
+    /// credentials, proxy/CA overrides and interpreter injection knobs which
+    /// would then reach vendor CLIs. Start with the small set needed for normal
+    /// user paths, temporary files and locale behavior, layer the validated
+    /// Workspace context on top, and pin executable discovery last.
     static func childEnvironment(extraEnv: [String: String] = [:]) -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
+        let ambient = ProcessInfo.processInfo.environment
+        let inheritedKeys = [
+            "HOME", "USER", "LOGNAME", "TMPDIR",
+            "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+            "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING"
+        ]
+        var env = Dictionary(
+            uniqueKeysWithValues: inheritedKeys.compactMap { key in
+                ambient[key].map { (key, $0) }
+            }
+        )
+        env["HOME"] = env["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        env["TMPDIR"] = env["TMPDIR"] ?? NSTemporaryDirectory()
         for (key, value) in extraEnv {
             env[key] = value
         }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeRunner records every invocation and delegates to fn for the response, so
@@ -310,13 +311,15 @@ func TestValidationRejectsBadProfileRegion(t *testing.T) {
 	}
 }
 
-func TestRunAWSStderrAndSuccess(t *testing.T) {
+func TestRunAWSRedactsStderrAndReturnsSuccessOutput(t *testing.T) {
+	t.Setenv("AWS_CONFIG_FILE", "")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "")
 	// runAWS is the executor behind defaultRunner; exercise it with /bin/sh so
-	// the stderr-surfacing and success paths get real coverage without aws.
+	// stderr redaction and success paths get real coverage without aws.
 	if _, err := runAWS("/bin/sh", []string{"-c", "echo boom 1>&2; exit 3"}, nil); err == nil {
 		t.Fatal("expected error from non-zero exit")
-	} else if !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("stderr not surfaced, got: %v", err)
+	} else if strings.Contains(err.Error(), "boom") {
+		t.Fatalf("vendor stderr leaked through the connector boundary: %v", err)
 	}
 	out, err := runAWS("/bin/sh", []string{"-c", "printf hello"}, nil)
 	if err != nil {
@@ -324,6 +327,23 @@ func TestRunAWSStderrAndSuccess(t *testing.T) {
 	}
 	if string(out) != "hello" {
 		t.Fatalf("stdout = %q, want hello", out)
+	}
+}
+
+func TestRunAWSTimesOut(t *testing.T) {
+	t.Setenv("AWS_CONFIG_FILE", "")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "")
+	savedTimeout := awsCommandTimeout
+	awsCommandTimeout = 25 * time.Millisecond
+	defer func() { awsCommandTimeout = savedTimeout }()
+
+	started := time.Now()
+	_, err := runAWS("/bin/sleep", []string{"5"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("runAWS() error = %v, want timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout returned after %s, want under 1s", elapsed)
 	}
 }
 

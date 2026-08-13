@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +17,8 @@ import (
 
 	"ez-cloud-manager/internal/pathlock"
 )
+
+const maxCredentialsFileBytes = 4 << 20
 
 const (
 	KeyAccessKeyID     = "aws_access_key_id"
@@ -89,6 +92,11 @@ type ParsedCredentials struct {
 	Fields      map[string]string `json:"fields"`
 }
 
+// ErrConflict is returned when a conditional save's editor baseline no longer
+// matches the profile currently on disk. Provider adapters translate it to
+// provider.ErrConnectionConflict at the public abstraction boundary.
+var ErrConflict = errors.New("AWS credentials profile changed since it was loaded")
+
 type lineKind int
 
 const (
@@ -123,6 +131,78 @@ func DefaultPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".aws", "credentials"), nil
+}
+
+// DefaultConfigPath returns the AWS shared config file. Unlike credentials,
+// this contains non-secret profile/session metadata and is the authoritative
+// source for IAM Identity Center (SSO) profiles.
+func DefaultConfigPath() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("AWS_CONFIG_FILE")); override != "" {
+		return override, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".aws", "config"), nil
+}
+
+// ListConfigProfiles returns AWS shared-config profiles only. [sso-session]
+// and [services] sections are deliberately excluded. Values are non-secret,
+// but callers still receive only key names in the summary.
+func ListConfigProfiles(path string) ([]ProfileSummary, error) {
+	model, err := readModel(path)
+	if err != nil {
+		return nil, err
+	}
+	profiles := make([]ProfileSummary, 0)
+	for _, sec := range model.sections {
+		name, ok := configProfileName(sec.name)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0)
+		for _, ln := range sec.lines {
+			if ln.kind == lineKV {
+				keys = append(keys, ln.key)
+			}
+		}
+		sort.Strings(keys)
+		profiles = append(profiles, ProfileSummary{Name: name, Keys: keys})
+	}
+	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
+	return profiles, nil
+}
+
+// GetConfigProfile reads one non-secret AWS shared-config profile. It never
+// resolves credential_process, source_profile or cached SSO credentials.
+func GetConfigProfile(path, name string) (Profile, error) {
+	name = strings.TrimSpace(name)
+	if err := validateProfileName(name); err != nil {
+		return Profile{}, err
+	}
+	model, err := readModel(path)
+	if err != nil {
+		return Profile{}, err
+	}
+	sectionName := "profile " + name
+	if name == "default" {
+		sectionName = "default"
+	}
+	idx := model.findSection(sectionName)
+	if idx < 0 {
+		return Profile{Name: name, Fields: map[string]string{}}, nil
+	}
+	return Profile{Name: name, Fields: model.sections[idx].fields()}, nil
+}
+
+func configProfileName(sectionName string) (string, bool) {
+	if sectionName == "default" {
+		return "default", true
+	}
+	name, ok := strings.CutPrefix(sectionName, "profile ")
+	name = strings.TrimSpace(name)
+	return name, ok && name != ""
 }
 
 func List(path string) ([]ProfileSummary, error) {
@@ -163,6 +243,17 @@ func Get(path, name string) (Profile, error) {
 }
 
 func Save(path, name string, fields map[string]string) (resultErr error) {
+	return save(path, name, fields, nil, false, false)
+}
+
+// SaveIfUnchanged atomically checks an editor baseline and writes the profile
+// under the same path lock. See provider.ConditionalSaver for the public
+// contract; this storage-level form intentionally avoids a package cycle.
+func SaveIfUnchanged(path, name string, fields, expectedFields map[string]string, expectAbsent bool) error {
+	return save(path, name, fields, expectedFields, expectAbsent, true)
+}
+
+func save(path, name string, fields, expectedFields map[string]string, expectAbsent, conditional bool) (resultErr error) {
 	name = strings.TrimSpace(name)
 	if err := validateProfileName(name); err != nil {
 		return err
@@ -174,6 +265,12 @@ func Save(path, name string, fields map[string]string) (resultErr error) {
 	normalized := normalizeFields(fields)
 	if err := validateFields(normalized); err != nil {
 		return err
+	}
+	expected := normalizeFields(expectedFields)
+	if conditional {
+		if err := validateFields(expected); err != nil {
+			return fmt.Errorf("validate expected AWS fields: %w", err)
+		}
 	}
 
 	release, err := pathlock.Acquire(path)
@@ -189,6 +286,16 @@ func Save(path, name string, fields map[string]string) (resultErr error) {
 		return err
 	}
 	idx := model.findSection(name)
+	if conditional {
+		exists := idx >= 0
+		if expectAbsent {
+			if exists {
+				return ErrConflict
+			}
+		} else if !exists || !maps.Equal(model.sections[idx].fields(), expected) {
+			return ErrConflict
+		}
+	}
 	if idx < 0 {
 		model.sections = append(model.sections, section{name: name})
 		idx = len(model.sections) - 1
@@ -273,12 +380,20 @@ func Parse(text string) ParsedCredentials {
 func readModel(path string) (fileModel, error) {
 	var model fileModel
 
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return model, nil
 		}
 		return model, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxCredentialsFileBytes+1))
+	if err != nil {
+		return model, err
+	}
+	if len(data) > maxCredentialsFileBytes {
+		return model, fmt.Errorf("AWS credentials/config file exceeds the %d-byte safety limit", maxCredentialsFileBytes)
 	}
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
