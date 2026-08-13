@@ -32,8 +32,19 @@ bash -n build.sh
 git diff --check
 
 echo "[6/8] Deterministic icon"
-swift -module-cache-path "$VERIFY_ROOT/swift-cache" tools/generate-icon.swift
-git diff --exit-code -- assets
+ICON_CHECK_ROOT="$VERIFY_ROOT/icon-check"
+mkdir -p "$ICON_CHECK_ROOT/tools" "$ICON_CHECK_ROOT/assets"
+cp tools/generate-icon.swift "$ICON_CHECK_ROOT/tools/generate-icon.swift"
+cp assets/EZCloudManagerAppIcon.master.png \
+  "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.master.png"
+swift -module-cache-path "$VERIFY_ROOT/swift-cache" \
+  "$ICON_CHECK_ROOT/tools/generate-icon.swift"
+cmp assets/EZCloudManagerAppIcon.icns \
+  "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.icns"
+cmp assets/EZCloudManagerAppIcon.preview.png \
+  "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.preview.png"
+diff -rq assets/EZCloudManagerAppIcon.iconset \
+  "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.iconset"
 
 echo "[7/8] Local secret scan"
 if command -v gitleaks >/dev/null 2>&1; then
