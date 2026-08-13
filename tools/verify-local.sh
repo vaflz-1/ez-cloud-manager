@@ -37,14 +37,18 @@ mkdir -p "$ICON_CHECK_ROOT/tools" "$ICON_CHECK_ROOT/assets"
 cp tools/generate-icon.swift "$ICON_CHECK_ROOT/tools/generate-icon.swift"
 cp assets/EZCloudManagerAppIcon.master.png \
   "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.master.png"
-swift -module-cache-path "$VERIFY_ROOT/swift-cache" \
+EZCLOUD_SKIP_ICONUTIL=1 swift -module-cache-path "$VERIFY_ROOT/swift-cache" \
   "$ICON_CHECK_ROOT/tools/generate-icon.swift"
-cmp assets/EZCloudManagerAppIcon.icns \
-  "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.icns"
 cmp assets/EZCloudManagerAppIcon.preview.png \
   "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.preview.png"
 diff -rq assets/EZCloudManagerAppIcon.iconset \
   "$ICON_CHECK_ROOT/assets/EZCloudManagerAppIcon.iconset"
+COMMITTED_ICONSET="$VERIFY_ROOT/committed-icon.iconset"
+iconutil -c iconset assets/EZCloudManagerAppIcon.icns -o "$COMMITTED_ICONSET"
+[ "$(find "$COMMITTED_ICONSET" -type f | wc -l | tr -d ' ')" = "10" ] || {
+  echo "error: committed ICNS does not contain all 10 representations" >&2
+  exit 1
+}
 
 echo "[7/8] Local secret scan"
 if command -v gitleaks >/dev/null 2>&1; then

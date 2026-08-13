@@ -148,6 +148,15 @@ for (fileName, size) in iconFiles {
 }
 try writePNG(drawIcon(pixelSize: 1024), to: previewURL)
 
+// Local verification compares the deterministic PNG representations without
+// asking the installed Xcode's iconutil to repackage them. Some Xcode builds
+// reject otherwise-valid legacy iconsets; release builds still package by
+// default, or explicitly validate the committed ICNS in build.sh's fallback.
+if ProcessInfo.processInfo.environment["EZCLOUD_SKIP_ICONUTIL"] == "1" {
+    print("Generated PNG representations (iconutil skipped for verification)")
+    exit(EXIT_SUCCESS)
+}
+
 let iconutil = Process()
 iconutil.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
 iconutil.arguments = ["-c", "icns", iconsetURL.path, "-o", icnsURL.path]
