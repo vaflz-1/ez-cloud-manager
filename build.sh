@@ -51,9 +51,21 @@ pkill -x AWSProfileManager 2>/dev/null || true
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 mkdir -p "$BUILD_APP/Contents/MacOS" "$BUILD_APP/Contents/Resources" "$DIST_DIR" "$(dirname "$CLI_LINK")" "$USER_HOME/Applications"
 
-# Generate every icon representation from the committed master so a stale
-# .icns can never slip into a local build.
-swift "$PROJECT_DIR/tools/generate-icon.swift"
+# Generate every icon representation from the committed master unless the
+# current Xcode iconutil rejects a previously verified legacy iconset. The
+# explicit opt-out still validates that the committed ICNS can be unpacked;
+# it never silently accepts a missing or corrupt resource.
+if [ "${EZCLOUD_REGENERATE_ICON:-1}" = "1" ]; then
+  swift "$PROJECT_DIR/tools/generate-icon.swift"
+else
+  ICON_VERIFY_DIR="$BUILD_ROOT/icon-verify.iconset"
+  iconutil -c iconset "$ICON_FILE" -o "$ICON_VERIFY_DIR"
+  [ "$(find "$ICON_VERIFY_DIR" -type f | wc -l | tr -d ' ')" = "10" ] || {
+    echo "error: committed icon does not contain all 10 representations" >&2
+    exit 1
+  }
+  echo "Using validated committed icon (EZCLOUD_REGENERATE_ICON=0)"
+fi
 
 if [ "${EZCLOUD_BUILD_MODE:-release}" = "debug" ]; then
   "$GO_BIN" build -trimpath -o "$DIST_DIR/ezcloud" "$PROJECT_DIR/cmd/ezcloud"
